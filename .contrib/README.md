@@ -1,31 +1,34 @@
-# 待提交：awesome-dsh-plugin 收录
+# 已提交：awesome-dsh-plugin 收录
 
 本目录存放提交到 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
-的条目文件，便于日后直接取用。
+的条目文件，与线上提交保持同步。
 
-## 为什么还没提
+## 当前状态
 
-该列表的收录要求里有一条硬门槛：**仓库创建满 1 天**（由 CI 自动检查）。
-本仓库创建于 2026-10-16T09:29:09Z，未满时提交会被自动拒绝。
-（官方说明：未达标就把功能做完再提交，重新提交不会有任何影响。）
+- **PR**：[#7606 Add Zxy0902/dsh-notes-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/7606)
+  （2026-10-16 提交，分支 `Zxy0902:add-dsh-notes-plugin`）
+- **`dsh-plugin` topic**：已给仓库加上
+- **仓库年龄**：本仓库创建于 2026-10-16T09:29:09Z。提交时不满 1 天，所以 gate 的年龄检查是红的；
+  但这一项由 `regate.yml` 每 6 小时自动重跑，满 1 天后自行变绿 —— **不要**关闭或重开 PR，
+  也不需要 push 空提交。
+- **预检**：本地跑过官方 `scripts/check-submission.mjs`，唯一未通过项就是年龄；`dsh.bundle`、
+  仓库存在性、分类取值、条目格式全部通过。
 
-## 怎么提
+## 条目文件
 
-1. 给仓库加上 `dsh-plugin` topic：
-   仓库首页 → 右上「⚙️」齿轮（About 右侧）→ Topics 填 `dsh-plugin` → Save
+线上提交路径与文件名必须完全一致：
 
-2. Fork [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
+```
+data/plugins/Zxy0902__dsh-notes-plugin.yml
+```
 
-3. 在 fork 里新建文件，路径与文件名必须完全一致：
+内容即本目录下的 `Zxy0902__dsh-notes-plugin.yml`。**一个文件就是全部投稿** —— 两个 README 由
+`data/plugins/*.yml` 生成、在 `main` 上自动重新生成，不要手工编辑，也不必由 PR 提交。
 
-   ```
-   data/plugins/Zxy0902__dsh-notes-plugin.yml
-   ```
+## 之后若要修改条目
 
-   内容即本目录下的 `Zxy0902__dsh-notes-plugin.yml`。
-
-4. 提交并开 PR。**一个文件就是全部投稿** —— 两个 README 由脚本从
-   `data/plugins/*.yml` 生成，不要手工编辑它们。
+改本目录的 yml → 用同样内容更新 fork 上 `add-dsh-notes-plugin` 分支的对应文件 → 更新既有 PR。
+**只改自己这一条**，不要动别人的条目（gate 会列出 PR 修改的每一个既有条目）。
 
 ## 已核对的要求
 
@@ -34,6 +37,8 @@
 | `package.json` 声明 `dsh.bundle` | ✅ |
 | 仓库根有 `cordis.patch.yml` | ✅ |
 | 真实可用代码（非占位/纯 README） | ✅ 已发布 npm |
-| 仓库创建满 1 天 | ⏳ 2026-10-17T09:29Z 后满足 |
-| 加 `dsh-plugin` topic | ⬜ 待做 |
-| 描述不含营销词、且与代码相符 | ✅ 逐条对照过源码 |
+| 仓库创建满 1 天 | ⏳ 2026-10-17T09:29:09Z 后由 CI 自动放行 |
+| 加 `dsh-plugin` topic | ✅ |
+| 描述不含营销词、且与代码相符 | ✅ 逐条对照过源码（删除行为据 `moveToTrash` 精确表述） |
+| 已发 npm（预构建安装免 `allowBuilds` 授权） | ✅ `dsh-client-ui-notes@0.1.5` |
+| 官方 `@deepseek-ai/*` 用 `peerDependencies` 声明 | ✅ |
