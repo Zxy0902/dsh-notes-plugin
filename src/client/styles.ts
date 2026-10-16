@@ -148,6 +148,9 @@ const CSS = `
   font-size: 12px;
   cursor: pointer;
   text-align: left;
+  /* 排序是「按住后移动鼠标」的手势：不允许这里起选文，否则拖动时会划出一片
+     蓝色选区。点按行为（打开文件 / 取消置顶）不受影响。 */
+  user-select: none;
 }
 .dsh-notes__pin:hover {
   border-color: var(--dsw-alias-border-l2);
@@ -812,6 +815,30 @@ const CSS = `
   margin-top: -8px;
   font-size: 11.5px;
   color: var(--dsw-alias-label-secondary);
+}
+
+/* 拖动排序时的被拖项：半透明虚影，示意它正被拿起 */
+.dsh-notes__pin--ghost { opacity: .45; }
+/* 拖动排序中：手势光标 + 禁止选中文字（指针拖拽会划过其他卡片） */
+.dsh-notes__pins--dragging { cursor: grabbing; }
+.dsh-notes__pins--dragging .dsh-notes__pin { user-select: none; }
+
+/* 插入缝隙指示线：绝对定位在卡片左缘外一点，表示「插到这张卡前面」；
+   --after 变体贴右缘，表示「插到最后」。 */
+.dsh-notes__pin { position: relative; }
+.dsh-notes__pin-gap {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: -3.5px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--dsw-alias-brand-primary);
+  pointer-events: none;
+}
+.dsh-notes__pin-gap--after {
+  left: auto;
+  right: -3.5px;
 }
 
 /* 拖拽时文件夹高亮 */

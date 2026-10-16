@@ -49,6 +49,11 @@ export interface NotesState {
    */
   fileVisibility: FileVisibility;
   /**
+   * 置顶区排版：`one` 单栏（每项一行，文件名完整可读）或 `two` 双栏（省空间）。
+   * 默认 `two`（与历史行为一致）。
+   */
+  pinLayout: PinLayout;
+  /**
    * 文件树刷新令牌。
    *
    * 目录内容是存在各树节点自己的 state 里的（懒加载、按展开状态拉取），
@@ -66,6 +71,9 @@ export const MAX_PINNED = 6;
 /** 文件树可见范围。 */
 export type FileVisibility = 'editable' | 'all';
 
+/** 置顶区排版。 */
+export type PinLayout = 'one' | 'two';
+
 /** localStorage 键名（带版本，便于后续迁移）。 */
 const STORAGE_KEY = 'dsh.notes.v1';
 
@@ -80,6 +88,7 @@ function emptyState(): NotesState {
     scroll: {},
     drafts: {},
     fileVisibility: 'editable',
+    pinLayout: 'two',
     treeRevision: 0,
   };
 }
@@ -140,6 +149,7 @@ function reviveState(raw: unknown): NotesState {
     drafts,
     // 旧版本数据没有这个字段，回落到默认值，不影响已有用户的记忆。
     fileVisibility: input.fileVisibility === 'all' ? 'all' : 'editable',
+    pinLayout: input.pinLayout === 'one' ? 'one' : 'two',
     treeRevision: 0,
   };
 }
@@ -252,6 +262,17 @@ export class NotesStore {
   setFileVisibility(mode: FileVisibility): void {
     if (this.state.fileVisibility === mode) return;
     this.commit({ ...this.state, fileVisibility: mode }, true);
+  }
+
+  /**
+   * 切换置顶区排版：单栏（每项一行，看得全）或双栏（省纵向空间）。
+   *
+   * 立即落盘：显式偏好，下次打开应当保持。旧版本数据没有这个字段，
+   * reviveState 会回落到默认值，不影响已有用户。
+   */
+  setPinLayout(layout: PinLayout): void {
+    if (this.state.pinLayout === layout) return;
+    this.commit({ ...this.state, pinLayout: layout }, true);
   }
 
   // -------------------------------------------------------------------------
@@ -429,6 +450,31 @@ export class NotesStore {
   unpin(path: string): void {
     if (!this.state.pinned.includes(path)) return;
     this.commit({ ...this.state, pinned: this.state.pinned.filter((item) => item !== path) }, true);
+  }
+
+  /**
+   * 拖动排序：把一个置顶项插到指定「缝隙」位置。
+   *
+   * 用缝隙下标而不是「插到某项前面」做锚点：锚点若是标签，插入后标签移位
+   * 会让锚点漂移，指针不动列表也会来回重排（闪烁）。缝隙是位置锚点，
+   * 预览重排后依然指向同一个地方，视觉稳定。
+   *
+   * @param path - 被拖动的置顶项路径。
+   * @param slot - 插入缝隙下标（按「摘除被拖项后」的数组计）；超出按末尾处理。
+   * @returns 是否真的发生了顺序变化（原地放置返回 false）。
+   */
+  reorderPinned(path: string, slot: number): boolean {
+    const pinned = this.state.pinned;
+    if (!pinned.includes(path)) return false;
+
+    // 先摘下来再算插入点，slot 按「摘除后」的数组计算才正确。
+    const rest = pinned.filter((item) => item !== path);
+    const index = Math.max(0, Math.min(slot, rest.length));
+    const next = [...rest.slice(0, index), path, ...rest.slice(index)];
+    if (next.every((item, i) => item === pinned[i])) return false;
+
+    this.commit({ ...this.state, pinned: next }, true);
+    return true;
   }
 
   // -------------------------------------------------------------------------

@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { FileTypeIcon, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
 import { MarkdownText, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives';
 import { NotesApi, NotesApiError, type DirEntry } from './api';
-import { MAX_PINNED, NotesStore, type FileVisibility, type NoteTab } from './store';
+import { MAX_PINNED, NotesStore, type FileVisibility, type NoteTab, type PinLayout } from './store';
 import { useScrollSync } from './useScrollSync';
 import { BREAKPOINTS, useElementWidth } from './useElementWidth';
 
@@ -103,6 +103,13 @@ const DRAG_EXPAND_DELAY_MS = 600;
 
 /** 置顶并排所需的最小左栏宽度（px）：低于此值单列，保证文件名可读。 */
 const PIN_TWO_COLUMN_MIN_WIDTH = 240;
+
+/**
+ * 置顶排序：按下后移动多少像素才算「拖拽」（px）。
+ *
+ * 小于该距离视为普通点击（打开文件 / 点 × 取消置顶），这样排序不会把点击吃掉。
+ */
+const PIN_DRAG_THRESHOLD = 4;
 
 /** 显示方式的可选项（供 SegmentedControl 使用）。 */
 const VIEW_MODE_OPTIONS = [
@@ -273,7 +280,12 @@ export function NotesPanel({
         const result = await api.move(state.root ?? '', from, destDir);
         store.remapPath(from, result.to);
         store.refreshTree();
-        flash(`已移动到「${basenameOf(destDir)}」`);
+        // destDir 就是根目录本身时不再显示文件夹名，直接说「根目录」。
+        flash(
+          destDir === state.root
+            ? '已移动到根目录'
+            : `已移动到「${basenameOf(destDir)}」`,
+        );
       } catch (error) {
         flash(`移动失败：${messageOf(error)}`);
       }
@@ -337,7 +349,17 @@ export function NotesPanel({
   }
 
   return (
-    <div className={`dsh-notes${narrow ? ' dsh-notes--narrow' : ''}`} ref={panelWidth.ref}>
+    <div
+      className={`dsh-notes${narrow ? ' dsh-notes--narrow' : ''}`}
+      ref={panelWidth.ref}
+      /* 声明本面板不参与「拖动整窗」：DSH 桌面端带着 data-window-drag 的行会被
+         设为窗口拖拽区（-webkit-app-region: drag），那块区域里的鼠标事件由系统
+         接管，页面收不到。本插件占满主面板，若被叠上拖拽区，面板内的点击/拖拽
+         就会失灵。data-window-drag-recall 是 DSH 自己提供的「退出拖拽区」标记
+         （ui-web base.css 里对应 -webkit-app-region: no-drag），只对本面板生效，
+         不影响 DSH 其他区域。 */
+      data-window-drag-recall=""
+    >
       {/* 窄容器下收起文件夹栏，避免左侧固定宽度把编辑区挤没 */}
       {!narrow && (
         <NotesSidebar
@@ -359,6 +381,8 @@ export function NotesPanel({
           onContextMenu={(entry, x, y) => setMenu({ entry, x, y })}
           fileVisibility={state.fileVisibility}
           onSetFileVisibility={(mode) => store.setFileVisibility(mode)}
+          pinLayout={state.pinLayout}
+          onSetPinLayout={(layout) => store.setPinLayout(layout)}
           onOpenExternal={openExternally}
         />
       )}
@@ -488,6 +512,9 @@ interface SidebarProps {
   /** 文件树可见范围。 */
   fileVisibility: FileVisibility;
   onSetFileVisibility: (mode: FileVisibility) => void;
+  /** 置顶区排版（单栏 / 双栏）。 */
+  pinLayout: PinLayout;
+  onSetPinLayout: (layout: PinLayout) => void;
   /** 用系统默认程序打开一个不可在阅读器内阅读的文件。 */
   onOpenExternal: (entry: DirEntry) => void;
 }
@@ -498,8 +525,157 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
 
   // 置顶并排需要每个胶囊放得下文件名。左栏固定 232px 时两列每列约 100px，
   // 中文名会被截成两三个字，所以按左栏实际宽度决定，而不是按面板断点。
+  // 用户也可以手动切换单栏/双栏：单栏牺牲纵向空间换完整文件名。
   const sidebarWidth = useElementWidth(0);
-  const twoColumnPins = sidebarWidth.width >= PIN_TWO_COLUMN_MIN_WIDTH;
+  const twoColumnPins = props.pinLayout === 'two' && sidebarWidth.width >= PIN_TWO_COLUMN_MIN_WIDTH;
+
+  // 置顶排序用「指针事件」自己实现，刻意不用 HTML5 拖拽（draggable +
+  // dragstart/dragover/drop）。
+  //
+  // 原因：在 DSH 桌面端（Electron）里这套原生拖拽对置顶区不可靠 —— 实测只有
+  // 列表最后一项能拖起来，前面的项一律无反应；而同一套代码在真实浏览器里用
+  // 相同事件序列又能通过，说明问题出在原生拖拽与宿主环境的交互上，不适合
+  // 继续猜。指针事件完全由自己控制：不涉及 dataTransfer、不需要 drop 目标、
+  // 不受「拖拽源元素被移动」影响，行为在任何环境下都一致。
+  // （文件树的拖拽仍用原生拖拽，那条路径在真实环境里是正常的。）
+  const [pinDragging, setPinDragging] = useState<string | null>(null);
+  const [pinSlot, setPinSlot] = useState<number | null>(null);
+  /** 正在拖拽的置顶项（同步 ref，事件管线的事实来源，不依赖 React 刷新时机）。 */
+  const pinDraggingRef = useRef<string | null>(null);
+  /** 当前落点格子（同步 ref，松手提交用）。 */
+  const pinSlotRef = useRef<number | null>(null);
+  /** 按下时的起点：移动超过阈值才算拖拽，否则保持为一次普通点击。 */
+  const pressRef = useRef<{ path: string; x: number; y: number } | null>(null);
+  /** 拖拽结束后吞掉随之而来的那一次 click，避免误开文件。 */
+  const suppressClickRef = useRef(false);
+  /** 拖拽期间挂在 document 上的监听器（结束时必须摘掉）。 */
+  const moveRef = useRef<((event: MouseEvent) => void) | null>(null);
+  const upRef = useRef<((event: MouseEvent) => void) | null>(null);
+  const pinsRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * 拖动期间的实时预览顺序：被拖项即时插入到 pinSlot 位置。
+   * 与 store.reorderPinned 完全一致（先摘除、再按摘除后的数组插），
+   * 松手时 store 写下的就是用户刚刚看到的样子。
+   */
+  const previewPinned = useMemo(() => {
+    if (pinDragging === null) return pinned;
+    const rest = pinned.filter((item) => item !== pinDragging);
+    const fallback = Math.max(pinned.indexOf(pinDragging), 0);
+    const index = Math.max(0, Math.min(pinSlot ?? fallback, rest.length));
+    return [...rest.slice(0, index), pinDragging, ...rest.slice(index)];
+  }, [pinned, pinDragging, pinSlot]);
+
+  /**
+   * 把指针位置换算成落点格子：网格按 count 个格子（含被拖项自己）均分，
+   * 指针在第几格，被拖项就放到第几格。
+   *
+   * 用格子坐标而不是「某张卡的矩形」做锚点，是因为预览重排会让卡片位置变化，
+   * 以卡片为锚点会自激振荡（列表闪烁、前几项拖不动）。格子只由容器几何决定，
+   * 预览前后指向同一处，稳定且每个位置都可达。
+   *
+   * @param clientX/clientY - 指针位置。
+   * @param count - 网格中的格子总数（= 置顶项总数）。
+   */
+  const slotFromPointer = (clientX: number, clientY: number, count: number): number => {
+    const box = pinsRef.current?.getBoundingClientRect();
+    if (box === undefined || box.width === 0 || box.height === 0 || count <= 1) return 0;
+    const columns = twoColumnPins ? 2 : 1;
+    const rows = Math.max(1, Math.ceil(count / columns));
+    // 指针落在容器内按比例折算行列；容器外（贴边）时夹到范围内。
+    const relX = Math.min(Math.max(clientX - box.left, 0), box.width - 0.001);
+    const relY = Math.min(Math.max(clientY - box.top, 0), box.height - 0.001);
+    const col = Math.min(columns - 1, Math.floor((relX / box.width) * columns));
+    const row = Math.min(rows - 1, Math.floor((relY / box.height) * rows));
+    return Math.min(Math.max(row * columns + col, 0), count - 1);
+  };
+
+  /**
+   * 结束一次指针拖拽：摘掉全局监听，必要时提交新顺序。
+   *
+   * @param commit - true 表示拖拽结束（提交顺序）；false 表示取消（如组件卸载）。
+   */
+  const endPinDrag = useCallback(
+    (commit: boolean) => {
+      if (moveRef.current !== null) document.removeEventListener('mousemove', moveRef.current);
+      if (upRef.current !== null) document.removeEventListener('mouseup', upRef.current);
+      moveRef.current = null;
+      upRef.current = null;
+
+      const dragging = pinDraggingRef.current;
+      if (commit && dragging !== null) {
+        const slot = pinSlotRef.current;
+        props.store.reorderPinned(dragging, slot ?? pinned.length - 1);
+        // 拖完紧跟着会来一次 click（按下与松开可能落在同一元素上），吞掉它，
+        // 否则排序后顺手把文件打开了。click 与 mouseup 在同一轮任务里派发，
+        // 所以这里用 0ms 定时器清标记就足够，不会误伤之后的正常点击。
+        suppressClickRef.current = true;
+        setTimeout(() => {
+          suppressClickRef.current = false;
+        }, 0);
+      }
+
+      pinDraggingRef.current = null;
+      pinSlotRef.current = null;
+      setPinDragging(null);
+      setPinSlot(null);
+    },
+    [props.store, pinned.length],
+  );
+
+  // 组件卸载时收尾，避免 document 上残留监听器。
+  useEffect(() => () => endPinDrag(false), [endPinDrag]);
+
+  /**
+   * 在某个置顶项上按下：进入「预备拖拽」状态，移动超过阈值才真正开始拖。
+   * 这样普通点击（打开文件 / 点 × 取消置顶）完全不受影响。
+   */
+  const onPinMouseDown = (event: React.MouseEvent<HTMLButtonElement>, path: string): void => {
+    if (event.button !== 0) return;
+    if (pinned.length < 2) return;
+    // 点 × 时不参与拖拽，交给它的点击逻辑。
+    if (event.target instanceof HTMLElement && event.target.closest('.dsh-notes__pin-x') !== null) {
+      return;
+    }
+    // 兜底：上一次拖拽若因鼠标在窗口外松开而没收到 mouseup，这里先收尾。
+    if (pinDraggingRef.current !== null) endPinDrag(false);
+    pressRef.current = { path, x: event.clientX, y: event.clientY };
+
+    const onMove = (moveEvent: MouseEvent): void => {
+      const press = pressRef.current;
+      if (press === null) return;
+
+      if (pinDraggingRef.current === null) {
+        // 阈值内视为点击，不进入拖拽状态。
+        if (
+          Math.hypot(moveEvent.clientX - press.x, moveEvent.clientY - press.y) <
+          PIN_DRAG_THRESHOLD
+        ) {
+          return;
+        }
+        // 起点落在自己当前所在格：预览从「原地」开始，不会先跳一下。
+        const startIndex = Math.max(pinned.indexOf(press.path), 0);
+        pinDraggingRef.current = press.path;
+        pinSlotRef.current = startIndex;
+        setPinDragging(press.path);
+        setPinSlot(startIndex);
+      }
+
+      const slot = slotFromPointer(moveEvent.clientX, moveEvent.clientY, pinned.length);
+      pinSlotRef.current = slot;
+      setPinSlot((prev) => (prev === slot ? prev : slot));
+    };
+
+    const onUp = (): void => {
+      pressRef.current = null;
+      endPinDrag(pinDraggingRef.current !== null);
+    };
+
+    moveRef.current = onMove;
+    upRef.current = onUp;
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
 
   return (
     <div className="dsh-notes__left" ref={sidebarWidth.ref}>
@@ -510,7 +686,7 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
         <IconCaret />
       </button>
 
-      {/* 置顶区：数量自适应 */}
+      {/* 置顶区：数量自适应；标题右侧是单/双栏排版切换 */}
       <div className="dsh-notes__pinned">
         <div className="dsh-notes__pinned-head">
           <IconPin size={11} />
@@ -518,6 +694,22 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
           <span className="dsh-notes__pinned-count">
             {pinned.length}/{MAX_PINNED}
           </span>
+          {/* 排版切换：双栏省纵向空间、单栏文件名看得全。只在一个以上置顶时出现。 */}
+          {pinned.length >= 2 && (
+            <button
+              type="button"
+              className="dsh-notes__vis"
+              aria-label="置顶排版"
+              title={
+                props.pinLayout === 'two'
+                  ? '当前双栏（省空间）；点此切换为单栏，文件名更完整'
+                  : '当前单栏（文件名完整）；点此切换为双栏，省纵向空间'
+              }
+              onClick={() => props.onSetPinLayout(props.pinLayout === 'two' ? 'one' : 'two')}
+            >
+              {props.pinLayout === 'two' ? '双栏' : '单栏'}
+            </button>
+          )}
         </div>
 
         {pinned.length === 0 ? (
@@ -525,16 +717,37 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
             暂无置顶。hover 文件行点右侧图钉即可置顶。
           </div>
         ) : (
-          <div className={`dsh-notes__pins${pinned.length >= 2 && twoColumnPins ? ' dsh-notes__pins--two' : ''}`}>
+          <div
+            ref={pinsRef}
+            className={`dsh-notes__pins${pinned.length >= 2 && twoColumnPins ? ' dsh-notes__pins--two' : ''}${pinDragging !== null ? ' dsh-notes__pins--dragging' : ''}`}
+          >
+            {/* 拖动期间的实时预览：用 CSS order 做视觉重排 —— DOM 顺序保持
+                pinned 不变，被拖元素在 DOM 里纹丝不动，拖拽绝不会被「源元素
+                被移动」打断（之前用预览数组直接重排 DOM,前两项一动就触发
+                dragend,表现为往后拖不动）。视觉上其他标签照样实时让位。 */}
             {pinned.map((path) => {
               const name = path.split('/').pop() ?? path;
+              // 拖动中按预览顺序给 order,其余时候保持 DOM 顺序。
+              const order = pinDragging !== null ? previewPinned.indexOf(path) : undefined;
+              const isFirst =
+                pinDragging !== null && previewPinned[0] === path && previewPinned[0] !== pinned[0];
+              const isLast =
+                pinDragging !== null &&
+                previewPinned[previewPinned.length - 1] === path &&
+                previewPinned[previewPinned.length - 1] !== pinned[pinned.length - 1];
               return (
                 <button
                   key={path}
                   type="button"
-                  className={`dsh-notes__pin${path === activePath ? ' dsh-notes__pin--active' : ''}`}
+                  data-pin-path={path}
+                  className={`dsh-notes__pin${path === activePath ? ' dsh-notes__pin--active' : ''}${path === pinDragging ? ' dsh-notes__pin--ghost' : ''}`}
                   title={path}
+                  style={order !== undefined ? { order } : undefined}
+                  // 排序走指针事件（见 onPinMouseDown 上方说明），不用原生拖拽。
+                  onMouseDown={(event) => onPinMouseDown(event, path)}
                   onClick={(event) => {
+                    // 刚拖完的那一次 click 丢掉。
+                    if (suppressClickRef.current) return;
                     // 点 × 取消置顶，点其余部分打开。
                     if ((event.target as HTMLElement).closest('.dsh-notes__pin-x') !== null) {
                       props.onTogglePin(path);
@@ -550,6 +763,10 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
                   <span className="dsh-notes__pin-x" title="取消置顶">
                     <IconClose size={9} />
                   </span>
+                  {/* 缝隙指示线：预览里排到最前的卡左缘 = 插到最前；
+                      排到最后一张的右缘 = 插到最后 */}
+                  {isFirst && <span className="dsh-notes__pin-gap" aria-hidden />}
+                  {isLast && <span className="dsh-notes__pin-gap dsh-notes__pin-gap--after" aria-hidden />}
                 </button>
               );
             })}
@@ -579,7 +796,21 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
         </button>
       </div>
 
-      <div className="dsh-notes__tree">
+      {/* 树容器本身也是放置目标：拖到树的空白处 = 移回根目录。
+          文件夹节点上的 drop 会 stopPropagation，优先命中更具体的目标。 */}
+      <div
+        className="dsh-notes__tree"
+        onDragOver={(event) => {
+          if (props.draggingPath === null) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'move';
+        }}
+        onDrop={(event) => {
+          if (props.draggingPath === null) return;
+          event.preventDefault();
+          props.onDropInto(root);
+        }}
+      >
         <TreeNode
           api={props.api}
           store={props.store}
