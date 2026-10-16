@@ -51,6 +51,9 @@
 | 回退回收站曾叫 `.dsh-notes-trash`（点开头） | 系统回收站不可用时删除文件，文件在界面上**彻底消失**——虽然还在磁盘上，但文件树隐藏所有点开头的条目，用户找不到也取不回 | 改名为 `dsh-notes-trash`（不带点），于是它在树里可见、可点开、可取回。**带点的目录被隐藏是特性，但对回收站是灾难**：它需要被看见。（后来 Windows 改为不提供删除，该回退目录现在只用于 macOS/Linux 上系统回收站写不进去的意外情形。） |
 | 删除文案写死「Finder 的『废纸篓』」 | Linux 用户看到 macOS 专有名词，且不知道去哪找 | 改为中性表述「系统回收站，可再取回」；回退时直接报出实际目录名。不写死平台名，因为各平台的叫法与位置本就不同。 |
 | Windows 上做不到「可还原的删除」 | 自建回收站只是把文件挪个地方：既没清掉垃圾（与删除的本意相悖），又让用户以为能像系统回收站那样还原，反而更容易误判 | Windows 没有可移植的用户态回收站路径；真正的回收站只能调 `SHFileOperation` 或 PowerShell 的 `Microsoft.VisualBasic.FileIO.FileSystem`，而[官方文档](https://learn.microsoft.com/dotnet/api/microsoft.visualbasic.fileio.filesystem.deletefile)注明「非用户交互的应用程序不支持 recycle 参数」，我们跑在后台进程里无法保证可靠。**决定：Windows 上不提供删除** —— 右键菜单不显示该项，服务端另有 403 兜底，避免直接调接口删出无法恢复的文件 |
+| 主按钮前景写死 `#fff`，暗色主题下几乎看不见 | 新建弹窗的「创建」按钮在暗色主题下变成**浅白色块、字看不清**。实测对比度 **1.05:1**（WCAG 最低要 4.5:1） | 根因：`--dsw-alias-brand-primary` 是**反色语义** —— 亮色主题下近黑 `rgb(15,17,21)`、暗色主题下近白 `rgb(249,250,251)`。写死白字后，暗色下就是白压白。修法：改用官方 `ui-primitives` 的 `Button.primary` 那套配对 token —— 背景 `--dsw-alias-button-primary-fill` + 前景 `--dsw-alias-label-primary-foreground`（会随主题反转），hover 也走 `--dsw-alias-button-primary-hover` 而非 `filter`。修复后暗色对比度 **18.08:1** |
+| 危险按钮用「红底白字」 | 暗色主题下对比度 **3.29:1**，低于 4.5 | 同一类问题的另一处：`--dsw-alias-state-error-primary` 也随主题变（亮色 `red-600` 深红、暗色 `red-400` 浅红）。改为与官方 `Menu.danger` 一致的做法：**红字 + 透明底**，hover 才加 `--dsw-alias-interactive-bg-hover-danger` 的淡红底。修复后暗色 **4.96:1**。顺带说明：亮色下红字压白底是 4.4976:1，差 0.0024 到阈值 —— 该色由 DSH 主题给定，官方 Menu.danger 用的也是它，故与设计系统保持一致，不为这 0.0024 偏离 token |
+| 这类 bug 只在暗色主题暴露 | 亮色主题下修复前后**看起来完全正常**，所以自测时没发现，直到用户切到暗色主题才报出来 | 教训：凡是「背景用主题 token + 前景写死颜色」的组合，都要在**明暗两套主题**下各验一次对比度，别只用眼睛看亮色主题。用 WCAG 公式算（正文 ≥ 4.5:1）比目测可靠 |
 
 ## 不可预览文件（打开方式）
 

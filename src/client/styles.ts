@@ -510,13 +510,22 @@ const CSS = `
   cursor: pointer;
 }
 .dsh-notes__btn:hover { border-color: var(--dsw-alias-border-l2); }
+/* 主按钮：背景与前景必须用【配套】的两个 token。
+   注意 --dsw-alias-brand-primary 是反色语义 —— 亮色主题下近黑、暗色主题下近白。
+   前景若写死 #fff，暗色主题下就是白字压白底，几乎看不见。
+   官方 ui-primitives 的 Button.primary 用的正是 label-primary-foreground 配对，
+   hover 也走 button-primary-hover 而不是 filter。 */
 .dsh-notes__btn--primary {
-  background: var(--dsw-alias-brand-primary);
-  border-color: var(--dsw-alias-brand-primary);
-  color: #fff;
+  background: var(--dsw-alias-button-primary-fill);
+  border-color: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-label-primary-foreground);
   font-weight: 600;
 }
-.dsh-notes__btn--primary:hover { filter: brightness(1.06); }
+.dsh-notes__btn--primary:hover:not(:disabled) {
+  background: var(--dsw-alias-button-primary-hover);
+  border-color: var(--dsw-alias-button-primary-hover);
+  filter: none;
+}
 .dsh-notes__btn:disabled { opacity: .5; cursor: default; }
 
 /* ---------------- 编辑区 ---------------- */
@@ -782,12 +791,19 @@ const CSS = `
   background: var(--dsw-alias-border-l1);
 }
 
-/* 删除按钮：危险色，和保存按钮区分开 */
+/* 危险按钮：与官方 ui-primitives 的 Menu.danger 一致 —— 用红字 + 淡红底，
+   不用「红底白字」。原因同主按钮：--dsw-alias-state-error-primary 随主题变化
+   （亮色深红、暗色浅红），写死 #fff 前景在暗色主题下对比度不足。
+   前景走 token、背景保持极淡，就不会有「白字压浅底」的问题。 */
 .dsh-notes__btn--danger {
   border-color: var(--dsw-alias-state-error-primary, #e5484d);
-  background: var(--dsw-alias-state-error-primary, #e5484d);
-  color: #fff;
+  background: transparent;
+  color: var(--dsw-alias-state-error-primary, #e5484d);
   font-weight: 600;
+}
+.dsh-notes__btn--danger:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover-danger, rgba(236, 19, 19, 0.05));
+  border-color: var(--dsw-alias-state-error-primary, #e5484d);
 }
 .dsh-notes__btn--danger:hover { filter: brightness(1.06); }
 
