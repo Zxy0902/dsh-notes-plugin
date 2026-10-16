@@ -35,13 +35,23 @@
 
 ## 安装
 
-> **前置条件：本插件是图形界面插件**，只在 **Web GUI**（`dsh web`，含桌面版）里有界面。
-> 纯终端场景（`dsh headless "..."`、SDK、ACP）装了不会报错，但也**没有任何功能可用** ——
-> 因为界面所依赖的槽位与 `webServer` 服务都由 `@deepseek-ai/dsh-web-app` 提供。
+> **前置条件：本插件是图形界面插件**，只在 **Web GUI** 里有界面 —— 包括桌面应用，
+> 以及终端里自己跑起来的 `dsh web`（浏览器访问）。
+> 纯终端场景（`dsh headless "..."`、SDK、ACP）装了不会报错，但也**没有任何功能可用**：
+> 界面所依赖的槽位与 `webServer` 服务都由 `@deepseek-ai/dsh-web-app` 提供。
 
-### 从 npm 安装（推荐）
+**桌面应用目前只发布 macOS 与 Windows 版，没有 Linux 版。** Linux 用户需要自行安装
+DSH CLI，再用 `dsh web` 在浏览器里使用（功能与桌面版一致）。
 
-分两步 —— **先建一个带 Web 界面的 profile，再把插件装进去**：
+### 桌面应用（macOS / Windows）
+
+在左侧栏打开**「插件」面板** → 点**「添加插件」** → 填入包名 `dsh-client-ui-notes` → 安装。
+
+> 注意不是「设置 → 内置插件」那一页 —— 那页只用于**查看**本部署内置了哪些插件，不能安装。
+
+### 终端 / 自建 profile（任意平台，含 Linux）
+
+先建一个带 Web 界面的 profile，再把插件装进去：
 
 ```sh
 # 1. 以 web 模板创建 profile（--dump-config 让它只建不启动，配置输出丢弃即可）
@@ -50,7 +60,7 @@ dsh --profile notes --from-default-profile web --dump-config > /dev/null
 # 2. 把插件装进该 profile
 dsh plugin --profile notes add dsh-client-ui-notes
 
-# 3. 启动
+# 3. 启动，然后在浏览器里打开它打印的地址
 dsh --profile notes web
 ```
 
@@ -60,6 +70,11 @@ dsh --profile notes web
 > `@deepseek-ai/dsh-base` 为基础的 profile，而 **base 里没有 Web 界面层**
 > （`@deepseek-ai/dsh-web-app`）。那样的 profile 启动 `web` 时界面出不来，
 > 插件自然也无从显示。
+>
+> ⚠️ 也不能用 `dsh plugin --profile desktop` 去装桌面应用的 profile：
+> 那个 profile 归应用独占管理，命令行写入会被拒绝
+> （`profile "desktop" is managed exclusively by the Electron application`）。
+> 桌面版请用上面的「插件」面板。
 
 想确认插件层已登记，可以看合并后的配置：
 
@@ -75,15 +90,6 @@ dsh --profile notes --dump-config | grep -A2 dsh-client-ui-notes
 ```sh
 dsh plugin --profile notes remove dsh-client-ui-notes
 ```
-
-> **Desktop App 用户**：桌面版的插件装在自己的 `desktop` profile 里，请从界面安装 ——
-> 装 [dshmarket](https://www.npmjs.com/package/dshmarket)（可视化插件市场）后搜本插件一键安装，
-> 或在「设置 → 插件」页面填包名 `dsh-client-ui-notes` 安装。
-> 桌面版与应用共用同一套 pnpm 安装实现，只是入口在 GUI 里。
->
-> ⚠️ 不能用上面那条 `dsh plugin` 命令去装桌面版：`desktop` 这个 profile 归应用独占管理，
-> 命令行写入会报 `profile "desktop" is managed exclusively by the Electron application`。
-> 这是**防止命令行和应用抢同一个 profile**，与「桌面版能不能装插件」无关。
 
 ### 首次使用
 
@@ -155,7 +161,15 @@ Host 半边注册的路由能真实读写磁盘，因此：
 
 ### 操作系统
 
-界面部分**不含任何平台相关代码**，三平台通用。只有两处与系统交互的地方有差异：
+插件代码本身**不含任何平台相关逻辑**，三平台通用。但**怎么跑起一个有界面的 DSH** 各平台不同：
+
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| 桌面应用 | ✅ | ✅ | ❌ 官方未发布 |
+| 自建 `dsh web` | ✅ | ✅ | ✅ |
+| 插件运行环境 | 两者皆可 | 两者皆可 | 只能自建 |
+
+插件在与系统交互的少数几处有差异，均已适配：
 
 | 能力 | macOS | Windows | Linux |
 |---|---|---|---|
