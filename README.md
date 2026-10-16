@@ -23,18 +23,65 @@
 | 显示方式 | 编辑 / 分栏 / **仅预览** 三段切换；仅预览时编辑框完全不渲染，纯阅读更清爽 |
 | 同步滚动 | 两侧按比例联动；工具栏可一键关闭，关闭后各自独立滚动 |
 | 自适应宽度 | 面板变窄时自动收起文件夹栏、改为上下堆叠，避免内容被挤成一列字 |
-| 层级分明 | 文件夹栏是内缩的圆角区块；macOS 折叠会话栏后，整个面板顶部下移 44px 让开交通灯，左栏贴左边且顶边与 tab 栏对齐 |
+| 层级分明 | 文件夹栏是内缩的圆角区块；macOS 折叠会话栏后，**只有左栏**额外下移让开交通灯，右侧阅读区（tab 栏 + 正文）保持不动，避免顶部露出空白带 |
 | 纯文本 | txt 单栏直接编辑，不显示无意义的预览栏 |
 | 新建 | 先选类型（Markdown / 纯文本），再填文件名；自动补扩展名 |
 | 手动保存 | `⌘S` / `Ctrl+S` 或保存按钮；未保存时 tab 有圆点、文档头显示「未保存」 |
 | 状态记忆 | tab、当前 tab、置顶、展开的目录、滚动位置、未保存草稿都会保留 |
 | 标签页管理 | tab 上右键可「关闭 / 关闭其他 / 关闭右侧标签页 / 关闭全部」；中键关闭 |
 | 标签溢出 | 标签多到放不下时，栏右端出现向下尖头，点开下拉列出全部标签（含被裁掉的），当前项高亮 |
-| 文件可见范围 | 文件树标题行有「可编辑 / 全部」开关（偏好持久化）。「可编辑」只列能在阅读器里打开的文件；「全部」连 `.doc`/`.pdf` 一起列出，点它们用**系统默认程序**打开 |
+| 文件可见范围 | 文件树标题行有「可编辑 / 全部」开关（偏好持久化）。「可编辑」只列能在阅读器里打开的文件；「全部」连 `.doc`/`.pdf` 一起列出 |
+| 打开方式 | 点这类不可预览的文件**不会直接弹出系统程序**，而是在阅读区开一个标签页：显示「此格式无法在阅读器中打开」+ 一个**打开方式**控件。左边按钮用默认应用打开，右边下拉列出系统里所有能打开它的应用，底部另有「显示文件位置」 |
 
 ## 安装
 
-```bash
+### 从 npm 安装（推荐）
+
+```sh
+dsh plugin --profile <profile名> add dsh-client-ui-notes
+```
+
+`<profile名>` 填你自己的 profile，例如 `notes`；**该 profile 不存在时会自动创建**（以 `@deepseek-ai/dsh-base` 为基础）。装完启动：
+
+```sh
+dsh --profile <profile名> web
+```
+
+左侧栏出现「笔记」图标即为安装成功。想确认插件层已登记，可以看合并后的配置：
+
+```sh
+dsh --profile <profile名> --dump-config | grep -A2 dsh-client-ui-notes
+# # == dsh-client-ui-notes
+# - id: ui-notes
+#   name: dsh-client-ui-notes
+```
+
+卸载：
+
+```sh
+dsh plugin --profile <profile名> remove dsh-client-ui-notes
+```
+
+> **Desktop App 用户**：桌面版的插件装在自己的 `desktop` profile 里，请从界面安装 ——
+> 装 [dshmarket](https://www.npmjs.com/package/dshmarket)（可视化插件市场）后搜本插件一键安装，
+> 或在「设置 → 插件」页面填包名 `dsh-client-ui-notes` 安装。
+> 桌面版与应用共用同一套 pnpm 安装实现，只是入口在 GUI 里。
+>
+> ⚠️ 不能用上面那条 `dsh plugin` 命令去装桌面版：`desktop` 这个 profile 归应用独占管理，
+> 命令行写入会报 `profile "desktop" is managed exclusively by the Electron application`。
+> 这是**防止命令行和应用抢同一个 profile**，与「桌面版能不能装插件」无关。
+
+### 首次使用
+
+插件初始没有任何笔记目录，需要两步：
+
+1. 点左上角的**文件夹按钮**选一个目录作为笔记根目录；
+2. 右侧文件树标题行的可见范围开关默认是「**可编辑**」（只列 `.md`/`.txt` 等能在阅读器里打开的文件）。
+   想看 `.doc`/`.pdf` 这类文件就切到「**全部**」。
+
+### 开发者方式（本地改动 + 热链接）
+
+```sh
 # 1. 构建
 cd ~/dsh-notes-plugin
 npm install          # 首次
@@ -56,6 +103,9 @@ ln -sfn ~/dsh-notes-plugin node_modules/dsh-client-ui-notes
 ```
 
 重启 DSH 后，左侧栏出现「笔记」按钮。
+
+> 用 `link:` 装的插件，**改了 `lib/` 下的产物必须重启 DSH** 才会生效：客户端产物是启动时
+> 读取并缓存的，磁盘文件变化不会自动重载。
 
 ## 工程结构
 
@@ -82,17 +132,27 @@ Host 半边注册的路由能真实读写磁盘，因此：
 - **根目录约束**：每个请求都要带 `root`（用户显式选中的文件夹），目标路径必须落在
   root 之内，`../` 穿越与相对路径一律拒绝。
 - **原子写**：先写同目录临时文件再 `rename`，不会出现半个文件。
-- **删除可恢复**：删除是移入同目录 `.dsh-notes-trash`，不是真删。
+- **删除可恢复**：删除优先移入**系统废纸篓**（macOS `~/.Trash`、Linux XDG 废纸篓），
+  用户在文件管理器里能直接找回；只有在系统废纸篓不可用时才回退到笔记根目录下的
+  `.dsh-notes-trash`。任何情况下都不是真删。
 - **只允许 md/txt 新建**，文件名里禁止路径分隔符。
 
 ## 兼容性
 
 - 目标 DSH：`>=0.2.0-rc.1`
-- **零三方运行时依赖**：客户端 bundle 只 `require` 平台基线模块
-  （`react`、`react/jsx-runtime`、`@deepseek-ai/dsh-client-ui-primitives`）。
-  DSH 冻结的模块表之外的东西一律不能用 —— 打包脚本会强制校验这一点。
-- 所有注册都包在 `ctx.slots.inject()` 里：**即使 DSH 未来删掉某个席位，
+- **零三方运行时依赖**：客户端 bundle 实际只 `require` 三个平台基线模块
+  （`react`、`react/jsx-runtime`、`@deepseek-ai/dsh-client-ui-primitives`），
+  宿主侧只用 Node 内置模块。打包脚本维护一份平台模块白名单
+  （`react` / `react-dom` / `@deepseek-ai/cordis` / `dsh-client-store` /
+  `dsh-client-ui-primitives` / `dsh-client-ui-slots`），**表外的模块一律不能用**，
+  越界会在构建期直接报错。
+- 所有槽位注册都包在 `ctx.slots.inject()` 里：**即使 DSH 未来删掉某个席位，
   插件也只是不显示，不会让启动失败。**
+- 客户端 `inject` 里**必须显式声明 `remote.session`**。DSH 把每个 Remote 命名空间
+  注册成独立的 cordis 服务（服务名就是 `remote.` + 命名空间名），而 cordis 的服务
+  可见性按 fiber 隔离 —— 只声明 `remote` 是读不到 `remote.session` 的，会抛
+  `cannot get property "remote.session" without inject`。官方 `ui-open-in-app`
+  同样如此声明。
 
 ## 已做的验证
 
