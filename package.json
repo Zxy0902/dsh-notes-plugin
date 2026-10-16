@@ -44,7 +44,9 @@
     "lib/client/**/*.d.ts",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "DEVELOPMENT.md",
+    "VERIFICATION.md"
   ],
   "dsh": {
     "engines": {
