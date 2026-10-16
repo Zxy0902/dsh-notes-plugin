@@ -454,7 +454,7 @@ export class NotesStore {
    * @param to - 移动后的绝对路径。
    */
   remapPath(from: string, to: string): void {
-    const name = to.slice(to.lastIndexOf('/') + 1);
+    const name = basenameOfPath(to);
 
     const tabs = this.state.tabs.map((tab) =>
       tab.id === from || tab.path === from ? { ...tab, id: to, path: to, name } : tab,
@@ -492,4 +492,18 @@ export class NotesStore {
     this.state = { ...this.state, treeRevision: this.state.treeRevision + 1 };
     for (const listener of this.listeners) listener();
   }
+}
+
+/**
+ * 取路径的文件名部分（同时识别 `/` 与 `\`）。
+ *
+ * 浏览器里没有 node:path，只能自己切；而 Windows 上 host 返回的是反斜杠路径，
+ * 只认 `/` 会让整个路径被当成文件名。
+ *
+ * @param path - 绝对或相对路径。
+ * @returns 最后一个分隔符之后的部分；没有分隔符时原样返回。
+ */
+function basenameOfPath(path: string): string {
+  const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return i < 0 ? path : path.slice(i + 1);
 }

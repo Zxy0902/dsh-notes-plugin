@@ -257,7 +257,7 @@ export function NotesPanel({
   );
 
   /**
-   * 确认删除：把文件移入系统废纸篓，然后关掉它的 tab 并刷新树。
+   * 确认删除：把文件移入回收站，然后关掉它的 tab 并刷新树。
    */
   const confirmDelete = useCallback(async () => {
     const entry = pendingDelete;
@@ -270,10 +270,12 @@ export function NotesPanel({
       store.closeTab(entry.path);
       store.unpin(entry.path);
       store.refreshTree();
+      // 文案不写死平台：系统回收站的位置与叫法各平台不同（macOS「废纸篓」、
+      // Windows/Linux「回收站」），回退时则直接报出实际目录，用户照着就能找到。
       flash(
         result.fallback
-          ? `已删除（回收站在 ${basenameOf(dirnameOf(result.moved))}/）`
-          : '已移入系统废纸篓，可从 Finder 的「废纸篓」放回',
+          ? `已移入 ${basenameOf(dirnameOf(result.moved))}/，可从那里取回`
+          : '已移入系统回收站，可从回收站取回',
       );
     } catch (error) {
       flash(`删除失败：${messageOf(error)}`);
@@ -418,7 +420,7 @@ export function NotesPanel({
         <ConfirmDialog
           title="删除文件"
           message={`确定删除「${pendingDelete.name}」吗？`}
-          detail="文件会被移到系统废纸篓，可以从 Finder 的「废纸篓」里放回原处。"
+          detail="文件会被移到系统回收站，可以再取回；系统回收站不可用时则移入笔记目录下的 dsh-notes-trash。"
           confirmLabel="删除"
           danger
           onCancel={() => setPendingDelete(null)}
@@ -1686,15 +1688,20 @@ function CreateDialog(props: CreateDialogProps): JSX.Element {
 // 模块级单例（供递归树节点取值，避免逐层透传）
 // ---------------------------------------------------------------------------
 
-/** 取路径的目录部分（不依赖 node:path，浏览器里没有）。 */
+/**
+ * 取路径的目录部分（不依赖 node:path，浏览器里没有）。
+ *
+ * 同时识别 `/` 与 `\`：Windows 上 host 返回的是反斜杠路径，只认 `/` 会把整个
+ * 路径当成文件名。无分隔符时返回空串（相对路径没有目录部分）。
+ */
 function dirnameOf(path: string): string {
-  const i = path.lastIndexOf('/');
-  return i <= 0 ? '/' : path.slice(0, i);
+  const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return i <= 0 ? '' : path.slice(0, i);
 }
 
-/** 取路径的文件名部分。 */
+/** 取路径的文件名部分（同时识别 `/` 与 `\`）。 */
 function basenameOf(path: string): string {
-  const i = path.lastIndexOf('/');
+  const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   return i < 0 ? path : path.slice(i + 1);
 }
 
@@ -1793,7 +1800,7 @@ function ContextMenu({ x, y, items, onClose }: ContextMenuProps): JSX.Element {
 interface ConfirmDialogProps {
   title: string;
   message: string;
-  /** 补充说明，例如「会移到废纸篓」。 */
+  /** 补充说明，例如「会移到回收站」。 */
   detail?: string;
   confirmLabel: string;
   danger?: boolean;

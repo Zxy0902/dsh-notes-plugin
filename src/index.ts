@@ -95,6 +95,18 @@ function isLoopbackRequest(request: {
 }
 
 // ---------------------------------------------------------------------------
+// 回收站
+// ---------------------------------------------------------------------------
+
+/**
+ * 系统回收站不可用时，在笔记根目录下使用的回退回收站目录名。
+ *
+ * 刻意不以点开头：文件树隐藏所有点开头的条目，带点的目录用户看不见，
+ * 被删的文件就找不回来了。不带点则它在树里可见、可点开、可取回。
+ */
+const TRASH_DIR_NAME = 'dsh-notes-trash';
+
+// ---------------------------------------------------------------------------
 // 路径安全
 // ---------------------------------------------------------------------------
 
@@ -305,11 +317,18 @@ async function atomicWrite(target: string, content: string): Promise<void> {
 }
 
 /**
- * 把文件移入系统废纸篓。
+ * 把文件移入系统回收站。
  *
- * 优先用 macOS 的 `~/.Trash`，这样用户在 Finder 的「废纸篓」里能直接看到并
- * 「放回原处」，和系统行为一致。若因跨分区或权限问题失败，回退到插件自己的
- * 回收站（`<root>/.dsh-notes-trash`），宁可换个地方也不要让删除直接报错。
+ * 按平台依次尝试系统回收站的位置，与系统行为保持一致：
+ * - macOS：`~/.Trash`，用户能在「访达 → 废纸篓」里看到并「放回原处」；
+ * - Linux：`~/.local/share/Trash/files`（XDG 规范）；
+ * - Windows：**没有可移植的用户态回收站路径**。真正的回收站只能通过
+ *   `SHFileOperation` / PowerShell 的 `Shell.Application` 等 API 写入，
+ *   为避免调用外部命令及其失败面，这里不走那条路，直接落到下面的回退目录。
+ *
+ * 回退目录刻意**不以点开头**（`<root>/dsh-notes-trash`）：文件树会隐藏所有点开头的
+ * 条目，若叫 `.dsh-notes-trash`，被删的文件在界面上就彻底找不到了 —— 虽然它还在
+ * 磁盘上，但用户会以为"删没了"。不带点则它在树里可见、可点开、可取回。
  *
  * 同名文件不覆盖：目标已存在时自动加时间戳前缀。
  *
@@ -335,7 +354,8 @@ async function moveToTrash(source: string, rootDir: string): Promise<{ moved: st
     }
   }
 
-  const fallbackDir = join(rootDir, '.dsh-notes-trash');
+  // 回退目录不带点，理由见上：带点会被文件树隐藏，用户就找不回误删的文件了。
+  const fallbackDir = join(rootDir, TRASH_DIR_NAME);
   await mkdir(fallbackDir, { recursive: true });
   const dest = await uniquePath(fallbackDir, basename(source));
   await rename(source, dest);
