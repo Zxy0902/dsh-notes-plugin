@@ -35,22 +35,36 @@
 
 ## 安装
 
+> **前置条件：本插件是图形界面插件**，只在 **Web GUI**（`dsh web`，含桌面版）里有界面。
+> 纯终端场景（`dsh headless "..."`、SDK、ACP）装了不会报错，但也**没有任何功能可用** ——
+> 因为界面所依赖的槽位与 `webServer` 服务都由 `@deepseek-ai/dsh-web-app` 提供。
+
 ### 从 npm 安装（推荐）
 
+分两步 —— **先建一个带 Web 界面的 profile，再把插件装进去**：
+
 ```sh
-dsh plugin --profile <profile名> add dsh-client-ui-notes
+# 1. 以 web 模板创建 profile（--dump-config 让它只建不启动，配置输出丢弃即可）
+dsh --profile notes --from-default-profile web --dump-config > /dev/null
+
+# 2. 把插件装进该 profile
+dsh plugin --profile notes add dsh-client-ui-notes
+
+# 3. 启动
+dsh --profile notes web
 ```
 
-`<profile名>` 填你自己的 profile，例如 `notes`；**该 profile 不存在时会自动创建**（以 `@deepseek-ai/dsh-base` 为基础）。装完启动：
+左侧栏出现「笔记」图标即为安装成功。
+
+> ⚠️ **不要跳过第 1 步。** 直接 `dsh plugin add` 会让 DSH 自动创建一个以
+> `@deepseek-ai/dsh-base` 为基础的 profile，而 **base 里没有 Web 界面层**
+> （`@deepseek-ai/dsh-web-app`）。那样的 profile 启动 `web` 时界面出不来，
+> 插件自然也无从显示。
+
+想确认插件层已登记，可以看合并后的配置：
 
 ```sh
-dsh --profile <profile名> web
-```
-
-左侧栏出现「笔记」图标即为安装成功。想确认插件层已登记，可以看合并后的配置：
-
-```sh
-dsh --profile <profile名> --dump-config | grep -A2 dsh-client-ui-notes
+dsh --profile notes --dump-config | grep -A2 dsh-client-ui-notes
 # # == dsh-client-ui-notes
 # - id: ui-notes
 #   name: dsh-client-ui-notes
@@ -59,7 +73,7 @@ dsh --profile <profile名> --dump-config | grep -A2 dsh-client-ui-notes
 卸载：
 
 ```sh
-dsh plugin --profile <profile名> remove dsh-client-ui-notes
+dsh plugin --profile notes remove dsh-client-ui-notes
 ```
 
 > **Desktop App 用户**：桌面版的插件装在自己的 `desktop` profile 里，请从界面安装 ——
