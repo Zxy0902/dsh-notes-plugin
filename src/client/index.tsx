@@ -13,6 +13,7 @@ import { NotesApi } from './api';
 import { NotesPanel } from './NotesPanel';
 import { NotesStore } from './store';
 import { injectStyles } from './styles';
+import { NotesUpdateAction, type UpdateActionProps } from './UpdateAction';
 
 /** 面板 id：同时作为 sidebar.panellist 的 id 与 main 的 key，两者必须一致。 */
 const PANEL_ID = 'notes';
@@ -233,6 +234,22 @@ export function apply(ctx: ClientContext): void {
     layout = null;
   }
 
+  /**
+   * 插件管理服务快照（插件页的更新控件用）。
+   *
+   * 【刻意不写进 inject】inject 是**加载期硬依赖**：声明了 `remote.pluginManager`
+   * 之后，cordis 会等这个服务出现才加载本插件 —— 万一某个 DSH 版本或精简 profile
+   * 没有插件管理器，本插件就会整个不加载（正是要避免的耦合）。
+   * 改用 `ctx.get()` 可选获取：拿不到就只是不显示更新按钮，其余功能照旧。
+   */
+  let pluginManager: UpdateActionProps['manager'] = null;
+  try {
+    pluginManager =
+      (ctx.get?.('remote.pluginManager') as UpdateActionProps['manager']) ?? null;
+  } catch {
+    pluginManager = null;
+  }
+
   // 页面卸载或切到后台前，把未落盘的改动补写一次，保证「记忆」不丢。
   ctx.effect(() => store.attachFlushOnUnload(), 'notes: persist flush');
 
@@ -393,6 +410,43 @@ export function apply(ctx: ClientContext): void {
         ),
       ),
     'notes: main panel',
+  );
+
+  /**
+   * 6) 插件页上的「检查更新 / 更新」控件。
+   *
+   * 注册在 DSH 官方席位 `plugins.detail.actions` 上（插件详情页头部的控件区）。
+   * 该席位由 DSH 的插件管理器声明，只有它挂载时才存在 —— `slots.inject` 会自动
+   * 等它就绪；DSH 若删掉这个席位，这里只是不注册，不影响插件其余部分。
+   *
+   * 控件自己判断 subject：只有本插件的详情页才渲染，别的插件页返回 null。
+   */
+  ctx.effect(
+    () =>
+      ctx.slots.inject('plugins.detail.actions', () =>
+        ctx.slots.register(
+          {
+            name: 'plugins.detail.actions',
+            id: 'notes.update',
+            order: 50,
+            label: '笔记更新',
+            inject: (): Partial<UpdateActionProps> => ({
+              manager: pluginManager,
+              // 问宿主是不是本地链接安装：只用于提示，拿不到就当不是。
+              probeLocalInstall: async () => {
+                try {
+                  const info = await api.health();
+                  return info.localInstall === true;
+                } catch {
+                  return false;
+                }
+              },
+            }),
+          },
+          NotesUpdateAction,
+        ),
+      ),
+    'notes: update action',
   );
 }
 

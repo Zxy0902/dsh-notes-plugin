@@ -491,6 +491,32 @@ export class NotesStore {
   }
 
   /**
+   * 全部收起：清空展开集合。
+   *
+   * 不必遍历目录树 —— 树的展开状态就是一串路径，清空即全部收拢。
+   */
+  collapseAll(): void {
+    if (this.state.expanded.length === 0) return;
+    this.commit({ ...this.state, expanded: [] }, true);
+  }
+
+  /**
+   * 整体替换展开集合（「全部展开」与「定位到当前文件」用）。
+   *
+   * 去重后与原集合完全一致就不写入，避免无意义的重渲染与落盘。
+   *
+   * @param paths - 需要处于展开状态的目录路径。
+   */
+  setExpanded(paths: readonly string[]): void {
+    const next = [...new Set(paths)];
+    const same =
+      next.length === this.state.expanded.length &&
+      next.every((item, index) => this.state.expanded[index] === item);
+    if (same) return;
+    this.commit({ ...this.state, expanded: next }, true);
+  }
+
+  /**
    * 文件被移动后，把引用旧路径的地方全部改到新路径。
    *
    * 涉及四处：已打开的 tab（id/path）、置顶列表、滚动记忆、未保存草稿。

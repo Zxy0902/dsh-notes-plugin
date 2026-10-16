@@ -13,6 +13,7 @@
  */
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 
@@ -112,6 +113,21 @@ function isLoopbackRequest(request: {
  * 反而更容易误判。所以 Windows 上直接不显示删除入口。
  */
 export const CAN_DELETE = process.platform !== 'win32';
+
+/**
+ * 本插件当前是不是「本地目录链接」安装（profile 里写的是 `link:` / `file:`）。
+ *
+ * 判据：宿主自己的代码路径里有没有 `node_modules/dsh-client-ui-notes` 这一段。
+ * npm / pnpm 装进 profile 时，真实路径一定落在
+ * `.../node_modules/dsh-client-ui-notes/lib/index.js`（pnpm 经 `.pnpm/...` 中转，
+ * 解析后同样含这一段）；而 `link:` 安装会把目录指向开发者自己的工程，路径里没有它。
+ *
+ * 只用于界面提示：本地链接安装时，插件页的「更新」会提示「会替换掉本地链接」。
+ * 判断不出来时按「不是本地」处理 —— 宁可多显示一个按钮，也不能让正常安装的用户
+ * 看不到更新入口。插件若被改名/复刻，这里就会判定为「不是本地」，也只是少一条提示。
+ */
+const SELF_DIR = dirname(fileURLToPath(import.meta.url));
+const LOCAL_INSTALL = !/(^|[\\/])node_modules[\\/]dsh-client-ui-notes([\\/]|$)/.test(SELF_DIR);
 
 /**
  * 系统回收站不可用时，在笔记根目录下使用的回退回收站目录名。
@@ -775,11 +791,15 @@ export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
       handler: (req, res) => {
         if (!guard(req, res, 'GET')) return;
         // canDelete 让客户端据此隐藏删除入口；服务端在删除路由里另有一道校验。
+        // platform 供客户端选择跟随平台的文案（如「在访达中打开」/「打开文件所在位置」）。
+        // localInstall 告诉插件页的更新控件：当前是本地链接安装（更新会替换链接）。
         writeJson(res, 200, {
           ok: true,
           plugin: 'notes',
           home: homedir(),
           canDelete: CAN_DELETE,
+          platform: process.platform,
+          localInstall: LOCAL_INSTALL,
         });
       },
     },

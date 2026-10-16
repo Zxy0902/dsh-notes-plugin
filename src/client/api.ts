@@ -26,6 +26,20 @@ export interface HostHealth {
   home: string;
   /** 本平台是否支持删除到系统回收站；false 时客户端不显示删除入口。 */
   canDelete: boolean;
+  /**
+   * 宿主平台（`process.platform`，如 `darwin`/`win32`/`linux`）。
+   *
+   * 用来挑跟随平台的文案：系统对「定位到文件」的叫法各不相同
+   * （访达 / 资源管理器 / 文件管理器）。旧宿主没有该字段，按通用说法兜底。
+   */
+  platform?: string;
+  /**
+   * 本插件是否以「本地目录链接」方式安装（profile 里是 `link:` / `file:`）。
+   *
+   * 真相只有宿主知道：它看自己的代码路径里有没有 `node_modules/dsh-client-ui-notes`。
+   * 插件页的更新控件用它给出「更新会替换本地链接」的提醒。
+   */
+  localInstall?: boolean;
 }
 
 /** 目录项。 */

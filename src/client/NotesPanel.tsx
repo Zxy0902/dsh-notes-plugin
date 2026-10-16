@@ -11,6 +11,7 @@ import { FileTypeIcon, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primi
 import { MarkdownText, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives';
 import { NotesApi, NotesApiError, type DirEntry } from './api';
 import { MAX_PINNED, NotesStore, type FileVisibility, type NoteTab, type PinLayout } from './store';
+import { ancestorsOf, listAllDirectories } from './treeOps';
 import { useScrollSync } from './useScrollSync';
 import { BREAKPOINTS, useElementWidth } from './useElementWidth';
 
@@ -58,6 +59,35 @@ function IconClose({ size = 10 }: { size?: number }): JSX.Element {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} strokeWidth={1.9} aria-hidden="true">
       <path d="M4 4l8 8M12 4l-8 8" />
+    </svg>
+  );
+}
+
+/** 定位图标：准星，表示「定位到当前文件」。 */
+function IconLocate({ size = 13 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} aria-hidden="true">
+      <circle cx="8" cy="8" r="5" />
+      <path d="M8 1.4v2.2M8 12.4v2.2M1.4 8h2.2M12.4 8h2.2" />
+      <circle cx="8" cy="8" r="1.4" />
+    </svg>
+  );
+}
+
+/** 展开图标：上下箭头朝外（Material 的 unfold_more 语义 = 打开全部）。 */
+function IconUnfoldMore({ size = 13 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} aria-hidden="true">
+      <path d="M5 5.2 8 2.2l3 3M11 10.8 8 13.8l-3-3" />
+    </svg>
+  );
+}
+
+/** 收缩图标：上下箭头朝内（Material 的 unfold_less 语义 = 收起全部）。 */
+function IconUnfoldLess({ size = 13 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} aria-hidden="true">
+      <path d="M5 2.6 8 5.6l3-3M11 13.4 8 10.4l-3 3" />
     </svg>
   );
 }
@@ -110,6 +140,20 @@ const PIN_TWO_COLUMN_MIN_WIDTH = 240;
  * 小于该距离视为普通点击（打开文件 / 点 × 取消置顶），这样排序不会把点击吃掉。
  */
 const PIN_DRAG_THRESHOLD = 4;
+
+/**
+ * 「全部展开」最多展开多少个目录。
+ *
+ * 展开要逐层列目录，超大目录树会遍历很久；到上限就停下并提示用户，
+ * 而不是让界面长时间没反应。
+ */
+const EXPAND_ALL_LIMIT = 500;
+
+/** 定位到文件后，节点高亮多久（毫秒）。 */
+const LOCATE_HIGHLIGHT_MS = 1600;
+
+/** 定位时等待树渲染出来的最大帧数（子目录是懒加载，展开后要几帧才出现）。 */
+const LOCATE_MAX_FRAMES = 40;
 
 /** 显示方式的可选项（供 SegmentedControl 使用）。 */
 const VIEW_MODE_OPTIONS = [
@@ -182,6 +226,17 @@ export function NotesPanel({
    */
   const [canDelete, setCanDelete] = useState(false);
 
+  /**
+   * 本平台是否支持「在系统文件管理器里定位到文件」。
+   *
+   * 同样以 false 起步、等宿主确认后再放开：Web GUI 等没有桌面能力的场景下
+   * `openWorkspacePath` 不可用，此时不该出现一个点了只会弹错的菜单项。
+   */
+  const [canReveal, setCanReveal] = useState(false);
+
+  /** 宿主平台，用于挑选跟随平台的文案（菜单里的「在访达中打开」等）。 */
+  const [platform, setPlatform] = useState<string | null>(null);
+
   // 面板自身宽度：会话栏折叠/展开、右侧栏拖拽、窗口缩放都会改变它。
   const panelWidth = useElementWidth(1024);
   /** 窄容器：收起左侧文件夹栏，把宽度让给编辑/预览。 */
@@ -205,7 +260,9 @@ export function NotesPanel({
     api
       .health()
       .then((info) => {
-        if (alive) setCanDelete(info.canDelete === true);
+        if (!alive) return;
+        setCanDelete(info.canDelete === true);
+        setPlatform(typeof info.platform === 'string' ? info.platform : null);
       })
       .catch(() => {
         // 读不到能力信息时按「不支持」处理，界面少一项总好过点了失败。
@@ -214,6 +271,35 @@ export function NotesPanel({
       alive = false;
     };
   }, [api]);
+
+  // 同一套思路：先问能不能「在系统文件管理器里定位到文件」，不能就不给入口。
+  useEffect(() => {
+    let alive = true;
+    canOpenExternal()
+      .then((value) => {
+        if (alive) setCanReveal(value);
+      })
+      .catch(() => {
+        // 探测失败按不支持处理（函数内部已兜底，这里只是防御）。
+      });
+    return () => {
+      alive = false;
+    };
+  }, [canOpenExternal]);
+
+  /**
+   * 在系统文件管理器里定位到某个文件。
+   *
+   * 走官方 `openWorkspacePath({ action: 'reveal' })`（与「不可预览文件」页里的
+   * 「显示文件位置」同一个入口），由系统自己决定打开访达/资源管理器/文件管理器。
+   */
+  const revealFile = useCallback(
+    async (path: string) => {
+      const error = await openExternal(path, { reveal: true });
+      if (error !== null) flash(error);
+    },
+    [openExternal, flash],
+  );
 
   /** 切换浏览文件夹。 */
   const chooseFolder = useCallback(async () => {
@@ -386,6 +472,7 @@ export function NotesPanel({
           pinLayout={state.pinLayout}
           onSetPinLayout={(layout) => store.setPinLayout(layout)}
           onOpenExternal={openExternally}
+          onNotice={flash}
         />
       )}
 
@@ -461,12 +548,20 @@ export function NotesPanel({
               label: state.pinned.includes(menu.entry.path) ? '取消置顶' : '置顶',
               onPick: () => togglePin(menu.entry.path),
             },
+            // 定位与删除都属于「对文件本身的操作」，与上面的打开/置顶用分隔线隔开。
+            ...(canReveal || canDelete ? [{ separator: true as const }] : []),
+            // 文案跟随平台：系统自己怎么叫就怎么写，用户才知道文件会出现在哪。
+            ...(canReveal
+              ? [
+                  {
+                    label: revealLabelOf(platform),
+                    onPick: () => void revealFile(menu.entry.path),
+                  },
+                ]
+              : []),
             // 删除只在支持移入系统回收站的平台出现（见 canDelete 的说明）。
             ...(canDelete
-              ? [
-                  { separator: true as const },
-                  { label: '删除', danger: true, onPick: () => setPendingDelete(menu.entry) },
-                ]
+              ? [{ label: '删除', danger: true, onPick: () => setPendingDelete(menu.entry) }]
               : []),
           ]}
         />
@@ -519,11 +614,99 @@ interface SidebarProps {
   onSetPinLayout: (layout: PinLayout) => void;
   /** 用系统默认程序打开一个不可在阅读器内阅读的文件。 */
   onOpenExternal: (entry: DirEntry) => void;
+  /** 在树上做一次性提示（定位失败、展开被截断等）。 */
+  onNotice: (message: string) => void;
 }
 
 /** 左侧：切换文件夹按钮、置顶区、文件树。 */
 function NotesSidebar(props: SidebarProps): JSX.Element {
   const { root, pinned, expanded, activePath } = props;
+
+  /** 文件树滚动容器：定位时用它把目标节点滚进视野。 */
+  const treeRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * 把某个路径的节点滚到视野中央，并短暂高亮。
+   *
+   * 子目录是懒加载的：展开祖先之后节点要过几帧才渲染出来，所以按帧重试。
+   * 高亮直接改 DOM class（一次性视觉反馈），不往树里层层透传状态 —— 节点被
+   * React 重建时高亮自然消失，无副作用。
+   *
+   * @param target - 目标文件路径。
+   * @returns 是否已找到并定位（找不到由调用处提示）。
+   */
+  const scrollToPath = useCallback((target: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      let frames = 0;
+      const tick = (): void => {
+        const container = treeRef.current;
+        const node =
+          container === null
+            ? null
+            : Array.from(container.querySelectorAll<HTMLElement>('[data-path]')).find(
+                (item) => item.getAttribute('data-path') === target,
+              ) ?? null;
+
+        if (container !== null && node !== null) {
+          const box = container.getBoundingClientRect();
+          const rect = node.getBoundingClientRect();
+          // 只在不在视野内时滚动，并把目标放到中间，避免上下贴边看不见上下文。
+          if (rect.top < box.top || rect.bottom > box.bottom) {
+            container.scrollTop += rect.top - box.top - (box.height - rect.height) / 2;
+          }
+          node.classList.add('dsh-notes__node--located');
+          setTimeout(() => node.classList.remove('dsh-notes__node--located'), LOCATE_HIGHLIGHT_MS);
+          resolve(true);
+          return;
+        }
+
+        frames += 1;
+        if (frames >= LOCATE_MAX_FRAMES) {
+          resolve(false);
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+  }, []);
+
+  /**
+   * 定位到当前打开的文件：把它的祖先目录逐个展开，再滚过去高亮一下。
+   */
+  const locateActive = useCallback(async (): Promise<void> => {
+    if (props.root === null || activePath === null) {
+      props.onNotice('还没有打开的文件，先打开一个文件再定位');
+      return;
+    }
+    const ancestors = ancestorsOf(activePath, props.root);
+    if (ancestors.length > 0) {
+      props.store.setExpanded([...expanded, ...ancestors]);
+    }
+    const found = await scrollToPath(activePath);
+    if (!found) {
+      props.onNotice('当前树里找不到这个文件：可能被「可编辑」范围的过滤隐藏了');
+    }
+  }, [props, activePath, expanded, scrollToPath]);
+
+  /**
+   * 全部展开：逐层列出所有目录后整体展开。
+   *
+   * 只发一次状态写（setExpanded），避免边遍历边渲染导致树反复重排。
+   */
+  const expandAllDirs = useCallback(async (): Promise<void> => {
+    if (props.root === null) return;
+    const { dirs, truncated } = await listAllDirectories(props.api, props.root, EXPAND_ALL_LIMIT);
+    props.store.setExpanded(dirs);
+    if (truncated) {
+      props.onNotice(`目录太多，只展开了前 ${dirs.length} 个文件夹`);
+    }
+  }, [props]);
+
+  /** 全部收起：清空展开集合即可。 */
+  const collapseAllDirs = useCallback((): void => {
+    props.store.collapseAll();
+  }, [props.store]);
 
   // 置顶并排需要每个胶囊放得下文件名。左栏固定 232px 时两列每列约 100px，
   // 中文名会被截成两三个字，所以按左栏实际宽度决定，而不是按面板断点。
@@ -782,6 +965,43 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
           它是「这棵树显示什么」的开关，贴着树更符合心智。 */}
       <div className="dsh-notes__treehead">
         <span className="dsh-notes__treehead-label">文件</span>
+
+        {/* 树操作：定位当前文件 / 全部展开 / 全部收起。放在可见范围开关左侧，
+            三个都是「对树本身的动作」，与「树显示什么」的开关分开。 */}
+        <button
+          type="button"
+          className="dsh-notes__treebtn"
+          title={
+            activePath === null
+              ? '定位到当前文件（还没有打开的文件）'
+              : '定位到当前文件：展开它所在的文件夹并滚到它'
+          }
+          aria-label="定位到当前文件"
+          disabled={activePath === null}
+          onClick={() => void locateActive()}
+        >
+          <IconLocate />
+        </button>
+        <button
+          type="button"
+          className="dsh-notes__treebtn"
+          title="打开所有文件夹"
+          aria-label="打开所有文件夹"
+          onClick={() => void expandAllDirs()}
+        >
+          <IconUnfoldMore />
+        </button>
+        <button
+          type="button"
+          className="dsh-notes__treebtn"
+          title="收起所有文件夹"
+          aria-label="收起所有文件夹"
+          disabled={expanded.length === 0}
+          onClick={collapseAllDirs}
+        >
+          <IconUnfoldLess />
+        </button>
+
         <button
           type="button"
           className="dsh-notes__vis"
@@ -802,6 +1022,7 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
       {/* 树容器本身也是放置目标：拖到树的空白处 = 移回根目录。
           文件夹节点上的 drop 会 stopPropagation，优先命中更具体的目标。 */}
       <div
+        ref={treeRef}
         className="dsh-notes__tree"
         onDragOver={(event) => {
           if (props.draggingPath === null) return;
@@ -927,6 +1148,8 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
       {isRoot !== true && (
         <div
           className={`dsh-notes__node${dropActive ? ' dsh-notes__node--drop' : ''}`}
+          // data-path 供「定位到当前文件」按路径找节点（类名查询无法安全转义路径）。
+          data-path={path}
           onClick={() => props.store.toggleExpanded(path)}
           role="button"
           tabIndex={0}
@@ -1074,6 +1297,8 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
       <div
         key={entry.path}
         className={`dsh-notes__node${active ? ' dsh-notes__node--active' : ''}${external ? ' dsh-notes__node--muted' : ''}`}
+        // data-path 供「定位到当前文件」按路径找节点。
+        data-path={entry.path}
         title={external ? `${entry.path}（用系统默认程序打开）` : entry.path}
         role="button"
         tabIndex={0}
@@ -1968,6 +2193,19 @@ function dirnameOf(path: string): string {
 function basenameOf(path: string): string {
   const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   return i < 0 ? path : path.slice(i + 1);
+}
+
+/**
+ * 「在系统文件管理器里定位到文件」这项菜单的文案。
+ *
+ * 各平台对这个动作的叫法不同（macOS 的访达、Windows 的资源管理器、Linux 各家
+ * 文件管理器），用系统自己的说法，用户一眼就知道文件会出现在哪里。宿主没报
+ * 平台时用通用说法兜底。
+ */
+function revealLabelOf(platform: string | null): string {
+  if (platform === 'darwin') return '在访达中打开';
+  if (platform === 'win32') return '打开文件所在位置';
+  return '在文件管理器中显示';
 }
 
 /** 把任意异常转成可展示的中文文案。 */
