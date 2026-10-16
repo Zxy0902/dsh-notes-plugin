@@ -8,11 +8,22 @@
 - **PR**：[#7606 Add Zxy0902/dsh-notes-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/7606)
   （2026-10-16 提交，分支 `Zxy0902:add-dsh-notes-plugin`）
 - **`dsh-plugin` topic**：已给仓库加上
-- **仓库年龄**：本仓库创建于 2026-10-16T09:29:09Z。提交时不满 1 天，所以 gate 的年龄检查是红的；
-  但这一项由 `regate.yml` 每 6 小时自动重跑，满 1 天后自行变绿 —— **不要**关闭或重开 PR，
-  也不需要 push 空提交。
+- **CI 现状**：`check`（条目格式 / awesome-lint / 站点构建）✅ 通过；`Submission gate` ❌，唯一原因
+  是仓库年龄（gate 原文：`repository is 0.2 days old (needs 1)`）。这一项由 `regate.yml` 自动重跑
+  清除，**不要**关闭或重开 PR，也不需要 push 空提交。
 - **预检**：本地跑过官方 `scripts/check-submission.mjs`，唯一未通过项就是年龄；`dsh.bundle`、
   仓库存在性、分类取值、条目格式全部通过。
+
+## 时间线与手动加速
+
+- **2026-10-17T09:29:09Z**（北京时间 10-17 17:29）：仓库满 1 天，年龄门槛消除。
+- **自动转绿**：`regate.yml` 对「年龄类失败」设有 **24 小时冷却**（距上次判定），而 gate 是
+  2026-10-16T15:16Z 判的，所以最早要等到 2026-10-17T19:19Z 那一轮（cron `19 */6 * * *`）才会重跑。
+  预计北京时间 10-18 03:19 前后自行变绿 —— 无需任何操作。
+- **想更早绿**（必须等满 1 天之后再动手）：直接重跑 gate 那次 run，不受 24 小时冷却限制。
+  网页路径：仓库 → Actions → 找到 `Submission gate` 那次 run → **Re-run jobs**；或重跑
+  `PR check`（[run 38921389649](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/actions/runs/38921389649)），
+  它会重新触发 gate。
 
 ## 条目文件
 
