@@ -5,11 +5,13 @@
  * （subject）交给每条注册项，我们只认自己的 bundle，其余一律返回 null —— 所以
  * 别人的插件页不会多出这个按钮。
  *
- * 检查与更新都走官方 `remote.pluginManager`（官方插件页自己用的同一套）：
- * - `inspect('<包名>@latest')` 解析 npm 上的最新版本；
- * - `installBundle('<包名>@latest', ...)` 让 DSH 用它自己的安装流程升级 ——
- *   与用户在插件页手动安装完全同一条路径，本插件**不自己跑包管理器、不碰
- *   profile 文件**，因此不会对 DSH 自身产生副作用。
+ * 检查与更新分工明确：
+ * - **检查**走本插件自己的宿主半边（`checkLatest`）去问 npm 的 `latest` dist-tag。
+ *   不用插件管理服务的 `inspect`：那是**安装前校验**，包一旦装进 profile 就会被
+ *   它以 `already-installed` 拒绝，拿它当「检查更新」必然一进页面就失败。
+ * - **更新**走官方 `installBundle('<包名>@<版本>')`，让 DSH 用它自己的安装流程升级
+ *   （对已安装的包就是升级）—— 与用户在插件页手动安装同一条路径，本插件
+ *   **不自己跑包管理器、不碰 profile 文件**，因此不会对 DSH 自身产生副作用。
  *
  * 两处刻意保守：
  * 1. 拿不到 `pluginManager`（老版本 DSH、精简 profile、服务改名）时**整个控件
@@ -32,21 +34,6 @@ interface UpdateSubject {
   };
 }
 
-/** `inspect` 的接受分支（只声明用到的字段）。 */
-interface SpecAccepted {
-  status?: string;
-  kind?: string;
-  name?: string;
-  version?: string;
-}
-
-/** `inspect` 的拒绝分支。 */
-interface SpecRefused {
-  status?: string;
-  problem?: string;
-  reason?: string;
-}
-
 /** `installBundle` 的变更结果（只声明用到的字段）。 */
 interface InstallChange {
   changed?: boolean;
@@ -64,9 +51,14 @@ interface RemoteAnswer<T> {
   error?: { code?: string; message?: string };
 }
 
-/** `remote.pluginManager` 的最小面：方法全部可选，缺失即降级。 */
+/**
+ * `remote.pluginManager` 的最小面：只需要安装能力，缺失即降级。
+ *
+ * 注意参数个数：gateway 会按 descriptor 严格校验，`installBundle` 是
+ * `(spec, options)` 两个业务参数（第三个才是可选 AbortSignal），少传会抛
+ * `client api: ... expected 2 business argument(s) ... got 1`。
+ */
 interface PluginManagerFacade {
-  inspect?(spec: string, options?: { registry?: string | null }): Promise<RemoteAnswer<SpecAccepted | SpecRefused> | null>;
   installBundle?(
     spec: string,
     options?: { enabled?: boolean; requestId?: string },
@@ -79,6 +71,15 @@ export interface UpdateActionProps {
   subject?: UpdateSubject;
   /** `remote.pluginManager` 快照；拿不到时为 null（控件不渲染）。 */
   manager?: PluginManagerFacade | null;
+  /**
+   * 查 npm 上的最新版本（由本插件宿主半边提供）。
+   *
+   * 返回宿主自己读出来的**包名**一并带上：插件被改名/复刻后，规格仍指向它自己。
+   *
+   * @param fresh - true 时绕过宿主端缓存。
+   * @returns 包名与最新版本号；失败时抛出带可读原因的异常。
+   */
+  checkLatest?: (fresh: boolean) => Promise<{ name: string; version: string }>;
   /** 问宿主：当前是不是本地链接安装。 */
   probeLocalInstall?: () => Promise<boolean>;
 }
@@ -186,6 +187,19 @@ function failureText(answer: { error?: { code?: string; message?: string } } | n
 }
 
 /**
+ * 把捕获到的异常转成可展示的一句话。
+ *
+ * **必须带上原始消息**：这套 Remote 是**严格校验参数个数**的，参数个数不对时
+ * 抛的是 `client api: <命名空间>/<方法> expected N business argument(s) ...,
+ * got M` —— 这种信息只有原文才看得出问题；之前只显示「检查更新失败」，
+ * 把真实原因吞掉了，排查只能靠猜。
+ */
+function errorText(error: unknown, label: string): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message === '' ? label : `${label}：${message}`;
+}
+
+/**
  * 插件页详情页头部控件。
  * @param props - 宿主给的 subject + 本插件注入的 manager / probeLocalInstall。
  */
@@ -198,49 +212,49 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
   const [phase, setPhase] = useState<Phase>({ name: 'idle' });
   /** 是否本地链接安装（探测失败按否处理）。 */
   const [local, setLocal] = useState(false);
+  /**
+   * 宿主报出来的本插件包名（检查更新时一并返回）。
+   *
+   * 用它而不是写死的常量去拼安装规格：插件被改名/复刻后依然指向自己。
+   */
+  const [remoteName, setRemoteName] = useState<string | null>(null);
 
-  const check = useCallback(async () => {
-    if (typeof manager?.inspect !== 'function') return;
-    setPhase({ name: 'checking' });
-    try {
-      const answer = await manager.inspect(`${SELF_PACKAGE}@latest`);
-      if (answer?.ok !== true) {
-        setPhase({ name: 'error', message: failureText(answer) });
-        return;
+  const check = useCallback(
+    async (fresh = false) => {
+      if (typeof props.checkLatest !== 'function') return;
+      setPhase({ name: 'checking' });
+      try {
+        const latest = await props.checkLatest(fresh);
+        setRemoteName(latest.name);
+        if (installed !== null && isNewerVersion(latest.version, installed)) {
+          setPhase({ name: 'outdated', version: latest.version });
+          return;
+        }
+        setPhase({ name: 'latest', version: latest.version });
+      } catch (error) {
+        // 带上原始消息：真实原因（网络、包名读不到、不是 bundle 等）必须可见。
+        setPhase({ name: 'error', message: errorText(error, '检查更新失败') });
       }
-      const value = answer.value;
-      if (value?.status !== 'accepted') {
-        const refused = value as SpecRefused | undefined;
-        setPhase({
-          name: 'error',
-          message:
-            codeText(refused?.problem) ??
-            (typeof refused?.reason === 'string' && refused.reason !== ''
-              ? refused.reason
-              : '检查更新失败'),
-        });
-        return;
-      }
-      const latest = (value as SpecAccepted).version ?? null;
-      if (latest !== null && installed !== null && isNewerVersion(latest, installed)) {
-        setPhase({ name: 'outdated', version: latest });
-        return;
-      }
-      setPhase({ name: 'latest', version: latest ?? installed });
-    } catch {
-      setPhase({ name: 'error', message: '检查更新失败' });
-    }
-  }, [manager, installed]);
+    },
+    [props, installed],
+  );
 
   const runUpdate = useCallback(
     async (version: string) => {
       if (typeof manager?.installBundle !== 'function') return;
       setPhase({ name: 'updating', version });
       try {
+        // 【必须显式传满 2 个业务参数】gateway 按 descriptor 严格校验个数：
+        // `installBundle(spec, options)`，第三个参数才是可选 AbortSignal。
+        //
+        // 规格用**精确版本**而不是 `@latest`：用户确认的是界面上那个版本号，
+        // 万一确认与执行之间又发了新版，也不该装一个他没见过的版本。
+        // 包名用宿主读出来的自身包名（拿不到时退回契约里声明的名字）。
+        const name = remoteName ?? pkg?.name ?? SELF_PACKAGE;
         // enabled: true —— 本插件正在运行（说明它本来就是启用状态），升级后保持启用。
         // 不传 approvedBuilds：安装脚本是否放行交给用户在插件页自己决定。
         const requestId = `notes-update-${Date.now().toString(36)}`;
-        const answer = await manager.installBundle(`${SELF_PACKAGE}@latest`, {
+        const answer = await manager.installBundle(`${name}@${version}`, {
           enabled: true,
           requestId,
         });
@@ -274,15 +288,21 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
         }
         // cancelled / 其它：按未变更处理，允许重试。
         setPhase({ name: 'error', message: '更新未完成' });
-      } catch {
-        setPhase({ name: 'error', message: '更新失败' });
+      } catch (error) {
+        setPhase({ name: 'error', message: errorText(error, '更新失败') });
       }
     },
-    [manager],
+    [manager, remoteName, pkg?.name],
   );
 
-  // 只在属于自己的页面、且官方服务可用时才工作。
-  const ours = subject?.kind === 'bundle' && pkg?.name === SELF_PACKAGE && manager !== null;
+  // 只在属于自己的页面、且两项能力都在时才工作：
+  // 「能查最新版本」（本插件宿主半边）+「能装」（官方 pluginManager）。
+  // 任一缺失都按不可用处理：宁可不显示入口，也不留一个点了没反应的按钮。
+  const ours =
+    subject?.kind === 'bundle' &&
+    pkg?.name === SELF_PACKAGE &&
+    typeof props.checkLatest === 'function' &&
+    typeof manager?.installBundle === 'function';
 
   // 进页面自动查一次；同时问宿主是不是本地链接安装（只为提示，失败不影响功能）。
   useEffect(() => {
@@ -321,7 +341,12 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
           <span className="dsh-notes-update__note">
             已是最新版本{phase.version === null ? '' : ` ${phase.version}`}
           </span>
-          <button type="button" className="dsh-notes-update__btn" onClick={() => void check()}>
+          {/* 手动重查要绕过宿主端缓存，否则刚发布的新版本查不到 */}
+          <button
+            type="button"
+            className="dsh-notes-update__btn"
+            onClick={() => void check(true)}
+          >
             重新检查
           </button>
         </>
@@ -376,7 +401,7 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
             {phase.restart ? '，重启 DSH 后生效' : ''}
             {phase.blocked ? '；安装脚本需在插件页批准后才会执行' : ''}
           </span>
-          <button type="button" className="dsh-notes-update__btn" onClick={() => void check()}>
+          <button type="button" className="dsh-notes-update__btn" onClick={() => void check(true)}>
             再查一次
           </button>
         </>
@@ -385,7 +410,12 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
       {phase.name === 'error' && (
         <>
           <span className="dsh-notes-update__note">检查/更新失败：{phase.message}</span>
-          <button type="button" className="dsh-notes-update__btn" onClick={() => void check()}>
+          {/* 重试也绕过缓存：失败常常是刚发布/刚恢复网络，读缓存没意义 */}
+          <button
+            type="button"
+            className="dsh-notes-update__btn"
+            onClick={() => void check(true)}
+          >
             重试
           </button>
         </>

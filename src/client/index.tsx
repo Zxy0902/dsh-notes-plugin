@@ -249,6 +249,29 @@ export function apply(ctx: ClientContext): void {
   } catch {
     pluginManager = null;
   }
+  if (pluginManager === null) {
+    // 兜底一：直接问 remote 门面（若某版本把命名空间收进 fiber 作用域，
+    // 这条可能有效；未声明 inject 时会抛，已包住）。
+    try {
+      const facade = ctx.remote as unknown as
+        | { pluginManager?: UpdateActionProps['manager'] }
+        | undefined;
+      pluginManager = facade?.pluginManager ?? null;
+    } catch {
+      pluginManager = null;
+    }
+  }
+  if (pluginManager === null) {
+    // 兜底二：留一行诊断，避免「更新入口为什么没出现」变成无从判断的问题。
+    // 只提示一次，且不进 UI —— 缺这个服务是旧版/精简环境下的正常降级。
+    try {
+      console.info(
+        '[notes] 未取到 remote.pluginManager，插件详情页的更新入口将不显示（其余功能不受影响）',
+      );
+    } catch {
+      // 控制台不可用就算了。
+    }
+  }
 
   // 页面卸载或切到后台前，把未落盘的改动补写一次，保证「记忆」不丢。
   ctx.effect(() => store.attachFlushOnUnload(), 'notes: persist flush');
@@ -440,6 +463,16 @@ export function apply(ctx: ClientContext): void {
                 } catch {
                   return false;
                 }
+              },
+              /**
+               * 查 npm 上的最新版本 —— 走**本插件自己的宿主半边**，不用插件管理
+               * 服务的 `inspect`：后者是安装前校验，已安装的包会被它以
+               * `already-installed` 拒绝，当「检查更新」用必然一进页面就失败。
+               * 宿主返回它自己读出来的包名，插件改名/复刻也不会查错包。
+               */
+              checkLatest: async (fresh: boolean) => {
+                const result = await api.latestVersion(fresh);
+                return { name: result.name, version: result.version };
               },
             }),
           },

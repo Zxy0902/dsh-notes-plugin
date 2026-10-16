@@ -129,6 +129,102 @@ export const CAN_DELETE = process.platform !== 'win32';
 const SELF_DIR = dirname(fileURLToPath(import.meta.url));
 const LOCAL_INSTALL = !/(^|[\\/])node_modules[\\/]dsh-client-ui-notes([\\/]|$)/.test(SELF_DIR);
 
+/** 取异常的一句话描述（宿主内多处要用同一套写法）。 */
+function messageOfError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 本插件自己的 npm 包名（从自身 package.json 读，别写死）。
+ *
+ * 「检查更新」要知道去 npm 上查哪个包。读自己的 package.json 而不是硬编码，
+ * 这样插件被改名/复刻后依旧查的是它自己。
+ *
+ * @returns 包名；读不到时返回 null（调用处给出可读错误）。
+ */
+async function selfPackageName(): Promise<string | null> {
+  try {
+    const raw = await readFile(join(SELF_DIR, '..', 'package.json'), 'utf8');
+    const parsed = JSON.parse(raw) as { name?: unknown };
+    return typeof parsed.name === 'string' && parsed.name !== '' ? parsed.name : null;
+  } catch {
+    return null;
+  }
+}
+
+/** npm 上「最新版本」的查询结果。 */
+interface LatestVersion {
+  /** 包名。 */
+  name: string;
+  /** `latest` dist-tag 指向的版本。 */
+  version: string;
+}
+
+/**
+ * 最近一次查询结果与时间。
+ *
+ * 插件页每次打开都会自动查一次，加 5 分钟缓存避免反复打 npm；用户手动点
+ * 「重新检查」时带 fresh 参数绕过缓存。
+ */
+let latestCache: { at: number; value: LatestVersion } | null = null;
+
+/** 缓存有效期（毫秒）。 */
+const LATEST_CACHE_MS = 5 * 60 * 1000;
+
+/** 查询 npm 的超时（毫秒）。 */
+const LATEST_TIMEOUT_MS = 8000;
+
+/**
+ * 查本插件在 npm 上的最新版本。
+ *
+ * 为什么不用插件管理服务的 `inspect`：那个接口是**安装前校验**，一旦这个包已经
+ * 装进 profile 就会以 `already-installed` 拒绝（源码里是 `known.has(name)` 判重），
+ * 拿它当「检查更新」用必然一进页面就失败。所以检查走这里直接问 npm 的
+ * `latest` dist-tag；真正的升级仍交给官方 `installBundle`（它对已安装的包就是升级）。
+ *
+ * @param logger - 宿主 logger。
+ * @param fresh - true 时绕过缓存。
+ * @returns 包名与最新版本。
+ * @throws HttpError 名称读不到（500）、网络失败（502）、返回体不可解析（502）。
+ */
+async function latestPublishedVersion(logger: Logger, fresh: boolean): Promise<LatestVersion> {
+  const name = await selfPackageName();
+  if (name === null) throw new HttpError(500, '无法读出本插件自己的包名');
+
+  if (!fresh && latestCache !== null && Date.now() - latestCache.at < LATEST_CACHE_MS) {
+    return latestCache.value;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}/latest`, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(LATEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    logger.warn(error);
+    throw new HttpError(502, `无法访问 npm 查询最新版本：${messageOfError(error)}`);
+  }
+
+  if (!response.ok) {
+    throw new HttpError(502, `npm 返回 ${String(response.status)}，查询最新版本失败`);
+  }
+
+  let version: unknown;
+  try {
+    version = ((await response.json()) as { version?: unknown }).version;
+  } catch {
+    throw new HttpError(502, 'npm 返回的内容无法解析');
+  }
+  if (typeof version !== 'string' || version === '') {
+    throw new HttpError(502, 'npm 没有给出该包的版本号');
+  }
+
+  const value: LatestVersion = { name, version };
+  latestCache = { at: Date.now(), value };
+  return value;
+}
+
 /**
  * 系统回收站不可用时，在笔记根目录下使用的回退回收站目录名。
  *
@@ -502,6 +598,7 @@ export const ROUTES = {
   remove: '/api/dsh-notes/remove',
   move: '/api/dsh-notes/move',
   health: '/api/dsh-notes/health',
+  latestVersion: '/api/dsh-notes/latest-version',
 } as const;
 
 /** 一条路由的形状（与 ctx.webServer.register 兼容）。 */
@@ -801,6 +898,22 @@ export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
           platform: process.platform,
           localInstall: LOCAL_INSTALL,
         });
+      },
+    },
+
+    // ---- 查 npm 上的最新版本（插件页「检查更新」用）----
+    {
+      kind: 'exact',
+      path: ROUTES.latestVersion,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'GET')) return;
+        try {
+          const fresh = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('fresh') === '1';
+          const result = await latestPublishedVersion(logger, fresh);
+          writeJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          fail(res, error);
+        }
       },
     },
   ];

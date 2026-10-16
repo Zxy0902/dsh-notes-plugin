@@ -17,6 +17,7 @@ export const API = {
   remove: 'api/dsh-notes/remove',
   move: 'api/dsh-notes/move',
   health: 'api/dsh-notes/health',
+  latestVersion: 'api/dsh-notes/latest-version',
 } as const;
 
 /** 宿主能力探测结果。 */
@@ -121,6 +122,32 @@ export class NotesApi {
   /** 读取宿主能力（目前用于判断本平台是否支持删除）。 */
   health(): Promise<HostHealth> {
     return this.request(API.health);
+  }
+
+  /**
+   * 查本插件在 npm 上的最新版本（插件页「检查更新」用）。
+   *
+   * 由**本插件自己的宿主半边**去问 npm —— 不用插件管理服务的 `inspect`：
+   * 那个接口是「安装前校验」，已安装的包会被它以 `already-installed` 拒绝。
+   *
+   * 404 会被翻译成可执行的提示：客户端半边是热更的、宿主半边要重启才会加载新路由，
+   * 两者不同步时这里必然 404，直接说清楚比丢个状态码让用户猜有用。
+   *
+   * @param fresh - true 时绕过宿主端 5 分钟缓存（用户手动点「重新检查」）。
+   * @returns 包名与最新版本号。
+   */
+  async latestVersion(fresh = false): Promise<{ ok: true; name: string; version: string }> {
+    try {
+      return await this.request(`${API.latestVersion}${fresh ? '?fresh=1' : ''}`);
+    } catch (error) {
+      if (error instanceof NotesApiError && error.status === 404) {
+        throw new NotesApiError(
+          '宿主半边还没提供查版本的接口（客户端已更新、宿主未重启），请完全退出并重开 DSH',
+          404,
+        );
+      }
+      throw error;
+    }
   }
 
   /** 发一次请求并把非 2xx 转成 NotesApiError。 */

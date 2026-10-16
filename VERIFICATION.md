@@ -135,3 +135,50 @@ health 返回 `ok`、`canDelete` 为布尔、`platform` 等于宿主 `process.pl
 - 把树容器压到 60px 高后点定位：目标被滚进视野（`scrollTop > 0`）且仍高亮
 - 没有打开文件时定位按钮为禁用态
 - 纯逻辑（真实产物）：`ancestorsOf` 跨平台 7 例（含 Windows 盘根 `C:\`、UNC 风格、越界不展开）、`listAllDirectories` 5 例（含上限截断、坏目录跳过）、`collapseAll`/`setExpanded` 4 例，全部通过
+
+**插件页「检查更新 / 更新」控件（真实浏览器 + 真实组件，26/26）**
+用真实 Chrome 加载编译产物、真实 React 挂载控件，以假 `pluginManager` 回放官方信封 `{ok, value}` / `{ok:false,error}`：
+- 门禁：别人的 bundle 页不渲染、也不发起任何调用；`manager` 缺失或缺少 `inspect` 方法时都不渲染（不留点了没反应的按钮）；全程无未捕获异常
+- 发现新版本：进页面自动检查、`inspect` 参数为 `dsh-client-ui-notes@latest`、显示「发现新版本 0.1.4（当前 0.1.3）」+「更新」
+- 确认步骤：先进入确认态说明「从 npm 更新到 x（当前 y）」，确认后调用 `installBundle`，且 spec 为 `@latest`、`enabled: true`、**不传 approvedBuilds**（不代批准安装脚本）、requestId 存在
+- 本地链接安装：确认时明确警示「更新后本插件将改为从 npm 安装，本地改动不再自动生效」，按钮转为警示样式
+- 结果分支：已是最新（不再给更新按钮 + 重新检查）、检查被拒（网络不可用 + 重试）、`restart-required` → 重启后生效、`pendingBuilds` → 需在插件页批准、`build-blocked` → 需先批准、`{ok:false}` 信封错误 → 显示原因
+
+控件实现所依赖的两个外部约定已从 DSH 自身源码核对：
+1. `inspect`/`installBundle` 的返回值确为 `{ok,value}`/`{ok,error}` 信封 —— 官方插件页客户端写的就是 `if (!inspected.ok) {...} if (inspected.value.status === 'refused')`；
+2. Remote 命名空间服务由 gateway 以 `ownerCtx.plugin({ name: remoteServiceKey(ns) })` 注册在**网关根**下（全局可见），gateway 自身也用 `ownerCtx.get(serviceKey)` 查重 —— 因此 `ctx.get('remote.pluginManager')` 能取到；而本版本 cordis 的 `_refresh()` 要求 `inject` 中**每个**服务都存在才加载，所以声明进 inject 反而会在缺该服务时阻塞整个插件，故按可选获取实现。
+
+**插件页更新控件的严格参数契约（真实网关行为复刻后实测）**
+- 现象：在真实 DSH 里打开插件详情页，更新控件直接显示失败。
+- 根因（已用 DSH 源码定位，不是猜测）：gateway 的 `prepareInvocation` 会**按 descriptor 严格校验业务参数个数** ——
+  `expected = descriptor.parameters.length`（`pluginManager/inspect` 为 2：`spec` + `options`；第三个参数才是可选的 `AbortSignal`），
+  个数不符即抛 `client api: pluginManager/inspect expected 2 business argument(s) plus an optional AbortSignal, got 1`。
+  原实现只传了 `spec` 一个参数，因此每次自动检查都抛错。
+- 修复：`inspect(spec, {})` 传满 2 个业务参数；并让所有失败分支**显示 gateway 的原始报错**（此前只显示通用「检查更新失败」，把真实原因吞掉了，导致只能靠猜）。
+- 验证：复现台的假服务改为**复刻 gateway 的严格参数校验**（个数不符抛一字不差的错误），28/28 通过 —— 其中包括：
+  - `inspect` 实际收到 2 个业务参数（个数被断言）；
+  - 服务抛异常时界面原文照显 `expected 2 ... got 1` 并保留重试入口。
+
+**更新入口的第二次修正：`inspect` 不能当「检查更新」用（已在真实环境暴露）**
+- 现象：修好参数个数后，真实 DSH 里打开插件详情页，控件显示「插件已经安装了」（原文 `dsh-client-ui-notes is already installed`）。
+- 根因（DSH 源码）：`inspect` 是**安装前校验**，其 registry 分支第一步就是 `if (known.has(parsed.name)) return refused("already-installed", ...)`
+  —— 只要这个包已装进 profile 就必然拒绝，拿它做「检查更新」永远失败。而 `installBundle(spec, options)` 没有这道按包名判重的门槛，
+  它的实现是「改 profile → 跑包管理器 → 应用重载生命周期」，**对已安装的包就是升级**。
+- 修法（分工重划）：
+  - **检查**改走本插件宿主半边新增的 `GET /api/dsh-notes/latest-version`：读自身 `package.json` 得包名（改名/复刻也查自己），
+    再查 npm 的 `latest` dist-tag；带 5 分钟缓存、8 秒超时，`?fresh=1` 供手动重查绕过缓存。
+  - **更新**仍走官方 `installBundle`，但规格改为**精确版本** `包名@<界面上确认的那个版本>`（确认什么就装什么），并传满 2 个业务参数。
+  - 失败分支显示 gateway / 宿主的**原始报错**（此前只给一句「失败」，真实原因不可见）。
+- 验证：新路由真实打 npm 实测 5/5（含缓存命中更快、fresh 绕过、非 GET 405）；控件界面 26/26（含「不再调用 inspect」、
+  「安装规格为精确版本」「传满 2 个参数」「门禁要求能查+能装」「检查失败原文照显」）；纯逻辑断言 30/30。
+
+**第三个现象：404（客户/宿主不同步，非代码问题）**
+- 现象：宿主加了新路由（`GET /api/dsh-notes/latest-version`）后，插件页仍提示 404。
+- 排查结论：
+  - 构建产物里**确实有**这条路由（`lib/index.js` 含 `latest-version`），客户端请求路径也一致；
+  - DSH 的路由匹配是 `new URL(req.url ?? '/', 'http://x').pathname`（**查询串被剥掉**，所以 `?fresh=1` 不影响匹配），
+    无匹配且无 fallback 时由 webserver 自己 `writeHead(404)`；
+  - 客户端插件有 HMR 会热更，**宿主半边必须重启进程才会加载新代码** —— 只刷新页面就会出现「客户端新版 + 宿主旧版」，
+    于是新路由 404。面板其余功能（list/read/health 等旧路由）照常，所以只有更新控件报 404。
+- 改善：把这句 404 翻译成可执行提示 —— 「宿主半边还没提供查版本的接口（客户端已更新、宿主未重启），请完全退出并重开 DSH」，
+  并对其它错误保持原文不改写。客户端 API 单测 5/5（成功路径、默认不带 fresh、fresh=true 带查询串、404 翻译、502 保留原文）。
