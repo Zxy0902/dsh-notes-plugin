@@ -1,0 +1,6 @@
+url: https://github.com/Zxy0902/dsh-notes-plugin
+name: Zxy0902/dsh-notes-plugin
+category: ui
+description:
+  en: 'Notes and folder reader in the main panel: file tree with pinned files, closeable tabs, Markdown split edit/preview with synced scrolling, plain-text editing, manual save, and drag-to-move. Deletion moves files to the system trash, or to an in-folder trash directory where no system trash exists.'
+  zh: '主面板内的备忘录与目录阅读器：文件树与置顶、可关闭的标签页、Markdown 左编右渲与同步滚动、纯文本编辑、手动保存、拖拽移动文件。删除的文件移入系统回收站，系统回收站不可用时移入笔记目录下的回收站目录。'
