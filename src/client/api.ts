@@ -16,7 +16,17 @@ export const API = {
   create: 'api/dsh-notes/create',
   remove: 'api/dsh-notes/remove',
   move: 'api/dsh-notes/move',
+  health: 'api/dsh-notes/health',
 } as const;
+
+/** 宿主能力探测结果。 */
+export interface HostHealth {
+  ok: boolean;
+  plugin: string;
+  home: string;
+  /** 本平台是否支持删除到系统回收站；false 时客户端不显示删除入口。 */
+  canDelete: boolean;
+}
 
 /** 目录项。 */
 export interface DirEntry {
@@ -79,9 +89,11 @@ export class NotesApi {
   /**
    * 删除一个文件。
    *
-   * 宿主优先移入系统废纸篓（Finder「废纸篓」里可见、可「放回原处」）；
-   * 跨分区或权限失败时回退到根目录下的 `.dsh-notes-trash`，
+   * 宿主优先移入系统回收站（可从系统回收站还原）；
+   * 跨分区或权限失败时回退到根目录下的 `dsh-notes-trash`，
    * 所以 `fallback` 为 true 时提示语要告诉用户去哪找。
+   *
+   * 仅在 `health().canDelete` 为 true 的平台可用；Windows 上调它会得到 403。
    */
   remove(root: string, path: string): Promise<{ ok: true; moved: string; fallback: boolean }> {
     return this.request(API.remove, { method: 'POST', body: { root, path } });
@@ -90,6 +102,11 @@ export class NotesApi {
   /** 把文件或目录移动到另一个目录里（拖拽）。 */
   move(root: string, path: string, to: string): Promise<{ ok: true; from: string; to: string }> {
     return this.request(API.move, { method: 'POST', body: { root, path, to } });
+  }
+
+  /** 读取宿主能力（目前用于判断本平台是否支持删除）。 */
+  health(): Promise<HostHealth> {
+    return this.request(API.health);
   }
 
   /** 发一次请求并把非 2xx 转成 NotesApiError。 */

@@ -95,14 +95,33 @@ function isLoopbackRequest(request: {
 }
 
 // ---------------------------------------------------------------------------
-// 回收站
+// 回收站与删除能力
 // ---------------------------------------------------------------------------
+
+/**
+ * 本平台是否支持「删除到系统回收站」。
+ *
+ * macOS 有 `~/.Trash`、Linux 有 XDG 回收站，都能直接移入并由系统提供还原；
+ * **Windows 没有可移植的用户态回收站路径** —— 真正的回收站只能通过
+ * `SHFileOperation` / PowerShell 的 `Microsoft.VisualBasic.FileIO.FileSystem` 等
+ * API 写入，而官方文档注明「非用户交互的应用程序不支持 recycle 参数」，
+ * 我们跑在后台进程里，无法保证可靠。
+ *
+ * 既然做不到「可还原的删除」，就不提供删除：本插件的删除本意是清理文件，
+ * 若只能挪进一个自建目录，既没清掉垃圾、又让用户以为还能从系统回收站找回，
+ * 反而更容易误判。所以 Windows 上直接不显示删除入口。
+ */
+export const CAN_DELETE = process.platform !== 'win32';
 
 /**
  * 系统回收站不可用时，在笔记根目录下使用的回退回收站目录名。
  *
  * 刻意不以点开头：文件树隐藏所有点开头的条目，带点的目录用户看不见，
  * 被删的文件就找不回来了。不带点则它在树里可见、可点开、可取回。
+ *
+ * 注意：这条回退路径只用于 macOS / Linux 上「系统回收站本身写不进去」的
+ * 意外情形（如跨分区、权限不足），不是 Windows 的常规路径 —— Windows 上
+ * `CAN_DELETE` 为 false，删除入口根本不出现。
  */
 const TRASH_DIR_NAME = 'dsh-notes-trash';
 
@@ -699,6 +718,10 @@ export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
       handler: async (req, res) => {
         if (!guard(req, res, 'POST')) return;
         try {
+          // 平台不支持可还原的删除时直接拒绝：客户端已隐藏入口，这里再挡一道，
+          // 避免直接调接口在 Windows 上删出无法恢复的文件。
+          if (!CAN_DELETE) throw new HttpError(403, 'deleting files is not supported on this platform');
+
           const body = await readJsonBody(req, 64 * 1024);
           if (body === null) throw new HttpError(400, 'invalid JSON body');
 
@@ -751,7 +774,13 @@ export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
       path: ROUTES.health,
       handler: (req, res) => {
         if (!guard(req, res, 'GET')) return;
-        writeJson(res, 200, { ok: true, plugin: 'notes', home: homedir() });
+        // canDelete 让客户端据此隐藏删除入口；服务端在删除路由里另有一道校验。
+        writeJson(res, 200, {
+          ok: true,
+          plugin: 'notes',
+          home: homedir(),
+          canDelete: CAN_DELETE,
+        });
       },
     },
   ];

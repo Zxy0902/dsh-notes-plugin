@@ -167,6 +167,14 @@ export function NotesPanel({
   /** 待确认删除的条目；非 null 时显示确认弹层。 */
   const [pendingDelete, setPendingDelete] = useState<DirEntry | null>(null);
 
+  /**
+   * 本平台是否支持删除（能否移入系统回收站）。
+   *
+   * 初值 false：**先当作不能用**，等宿主确认后再放开。宁可在极短的首帧里
+   * 少一个菜单项，也不要让 Windows 用户看到一个点了会被 403 拒绝的「删除」。
+   */
+  const [canDelete, setCanDelete] = useState(false);
+
   // 面板自身宽度：会话栏折叠/展开、右侧栏拖拽、窗口缩放都会改变它。
   const panelWidth = useElementWidth(1024);
   /** 窄容器：收起左侧文件夹栏，把宽度让给编辑/预览。 */
@@ -182,6 +190,23 @@ export function NotesPanel({
     setNotice(message);
     setTimeout(() => setNotice((current) => (current === message ? null : current)), 2400);
   }, []);
+
+  // 问一次宿主本平台能不能删除，据此决定右键菜单里是否出现「删除」。
+  // 探测失败就保持不支持：宁可不给入口，也不给一个点了会报错的入口。
+  useEffect(() => {
+    let alive = true;
+    api
+      .health()
+      .then((info) => {
+        if (alive) setCanDelete(info.canDelete === true);
+      })
+      .catch(() => {
+        // 读不到能力信息时按「不支持」处理，界面少一项总好过点了失败。
+      });
+    return () => {
+      alive = false;
+    };
+  }, [api]);
 
   /** 切换浏览文件夹。 */
   const chooseFolder = useCallback(async () => {
@@ -270,8 +295,9 @@ export function NotesPanel({
       store.closeTab(entry.path);
       store.unpin(entry.path);
       store.refreshTree();
-      // 文案不写死平台：系统回收站的位置与叫法各平台不同（macOS「废纸篓」、
-      // Windows/Linux「回收站」），回退时则直接报出实际目录，用户照着就能找到。
+      // 文案不写死平台：系统回收站的位置与叫法各平台不同（macOS 叫「废纸篓」、
+      // Linux 叫「回收站」），回退时则直接报出实际目录，用户照着就能找到。
+      // （Windows 上删除入口不出现，见 canDelete。）
       flash(
         result.fallback
           ? `已移入 ${basenameOf(dirnameOf(result.moved))}/，可从那里取回`
@@ -409,8 +435,13 @@ export function NotesPanel({
               label: state.pinned.includes(menu.entry.path) ? '取消置顶' : '置顶',
               onPick: () => togglePin(menu.entry.path),
             },
-            { separator: true },
-            { label: '删除', danger: true, onPick: () => setPendingDelete(menu.entry) },
+            // 删除只在支持移入系统回收站的平台出现（见 canDelete 的说明）。
+            ...(canDelete
+              ? [
+                  { separator: true as const },
+                  { label: '删除', danger: true, onPick: () => setPendingDelete(menu.entry) },
+                ]
+              : []),
           ]}
         />
       )}
