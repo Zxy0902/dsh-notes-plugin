@@ -1,0 +1,11 @@
+# 依赖与构建产物
+node_modules/
+lib/
+*.tgz
+
+# 凭据：绝不能提交，否则 npm token 会泄露
+.npmrc
+
+# 编辑器与系统
+.DS_Store
+*.log

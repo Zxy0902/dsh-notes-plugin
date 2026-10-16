@@ -1,0 +1,5 @@
+# 该补丁把笔记插件插入 web profile 的插件名册。
+# 以 profile bundle 层的方式生效(dsh.bundle.patch 清单字段)。
+- insert:
+    - id: ui-notes
+      name: 'dsh-client-ui-notes'
