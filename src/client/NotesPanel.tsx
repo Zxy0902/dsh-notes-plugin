@@ -323,7 +323,9 @@ export function NotesPanel({
   /** 从置顶区打开文件。 */
   const openPinned = useCallback(
     (path: string) => {
-      const name = path.split('/').pop() ?? path;
+      // 名字必须走 basenameOf：Windows 上是反斜杠路径，只认 `/` 会把整串路径
+      // 当成文件名（标签页标题因此显示全路径）。
+      const name = basenameOf(path);
       const lower = name.toLowerCase();
       const kind: 'md' | 'txt' = lower.endsWith('.md') || lower.endsWith('.markdown') ? 'md' : 'txt';
       store.openTab({ id: path, name, path, kind });
@@ -726,7 +728,8 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
                 被移动」打断（之前用预览数组直接重排 DOM,前两项一动就触发
                 dragend,表现为往后拖不动）。视觉上其他标签照样实时让位。 */}
             {pinned.map((path) => {
-              const name = path.split('/').pop() ?? path;
+              // 同样要跨平台取名字：Windows 上路径用反斜杠，只按斜杠切分会得到整串。
+              const name = basenameOf(path);
               // 拖动中按预览顺序给 order,其余时候保持 DOM 顺序。
               const order = pinDragging !== null ? previewPinned.indexOf(path) : undefined;
               const isFirst =
@@ -965,7 +968,7 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
           <span style={{ display: 'grid', placeItems: 'center', color: 'var(--dsw-alias-state-warn-primary, #f5a524)' }}>
             <IconFolder />
           </span>
-          <span className="dsh-notes__label">{path.split('/').pop() ?? path}</span>
+          <span className="dsh-notes__label">{basenameOf(path)}</span>
         </div>
       )}
 
