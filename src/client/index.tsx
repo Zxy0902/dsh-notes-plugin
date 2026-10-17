@@ -116,8 +116,6 @@ interface RemoteApplication {
  * 必须单独写进 inject（详见 apply 上方注释）。
  */
 interface RemoteFacade {
-  /** 目录选择器：用户挑一个笔记根目录。 */
-  directoryPicker?: { pick?(): Promise<string | null> };
   /** 会话相关：交给系统程序打开文件。 */
   session?: {
     canOpenWorkspacePath?(): Promise<{ ok: boolean; value?: boolean }>;
@@ -130,6 +128,18 @@ interface RemoteFacade {
       application?: string;
     }): Promise<{ ok: boolean; error?: unknown }>;
   };
+}
+
+/**
+ * 目录选择器 Remote 命名空间的**最小面**。
+ *
+ * 刻意不走 `remote.directoryPicker` 属性访问：那会被 inject 门控（未声明即抛
+ * `cannot get property "remote.directoryPicker" without inject`）。改为
+ * `ctx.get('remote.directoryPicker')` 可选获取，缺失时安静降级。
+ */
+interface PickDirectoryFacade {
+  /** 弹系统目录选择框；用户取消时返回 null（个别版本回 { ok, value } 信封）。 */
+  pick?(): Promise<string | null | { ok: boolean; value?: string }>;
 }
 
 /**
@@ -277,22 +287,77 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => store.attachFlushOnUnload(), 'notes: persist flush');
 
   /**
+   * 目录选择器 Remote 命名空间的快照。
+   *
+   * 【为什么单独取而不经过 remote 门面】`remote` 是 cordis 的 Service 代理，
+   * 对 `remote.<命名空间>` 的**属性访问**会被 inject 门控：只要该命名空间没写进
+   * `dsh.client.inject`，读取就会抛
+   * `cannot get property "remote.directoryPicker" without inject`。
+   * 之前 `pickDirectory` 把 `typeof remote?.directoryPicker?.pick === 'function'`
+   * 当作能力探测，这行在 workspace 拿不到时就会**炸掉**（探测本身即抛错）——
+   * 用户看到的就是这句 cordis 内部错误。
+   *
+   * 改成与 pluginManager 相同的策略：用 `ctx.get()` 可选获取（不受 inject 门控，
+   * 缺失时返回 undefined），拿不到只是「选择文件夹」不可用，其余功能照旧，
+   * 也不会因版本差异在加载期崩溃。
+   */
+  let directoryPicker: PickDirectoryFacade | null = null;
+  try {
+    directoryPicker =
+      (ctx.get?.('remote.directoryPicker') as PickDirectoryFacade | undefined) ?? null;
+  } catch {
+    directoryPicker = null;
+  }
+
+  /**
+   * 调用时刻再取一次可选服务。
+   *
+   * 服务就绪的时机不受本插件控制：`uiWorkspace` 由官方 ui-workspace 注册，
+   * 本插件的 apply 完全可能在它之前执行，于是快照是 null。所以除了快照，
+   * 每次真正要用时再 `get` 一次 —— 抛错就当作没有（fiber 上下文变化时 cordis
+   * 可能拒绝查找），绝不让查找本身把功能路径炸掉。
+   */
+  const readService = <T,>(name: string): T | null => {
+    if (typeof ctx.get !== 'function') return null;
+    try {
+      return (ctx.get(name) as T | undefined) ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
    * 调起 DSH 的目录选择器。
    *
-   * 首选注入的 `ctx.uiWorkspace.pickDirectory()`（官方 ui-workspace 提供；
-   * 本包必须把它写进 dsh.client.inject，否则运行时 ctx.get 拿不到）。
-   * 再退到生成的 Remote 客户端 `remote.directoryPicker.pick()`。
+   * 首选官方 `uiWorkspace.pickDirectory()`；再退到 Remote 命名空间的 `pick()`。
+   * 两者都是「快照 → 调用时再取」的顺序，避免 apply 时序导致能力凭空消失。
    *
    * 注意不要用裸 fetch 打路由：DSH 的 Remote 走的是带信封的 RPC，裸请求会被
    * 判成 gateway/bad-request，所以两处都走官方入口。
    */
   const pickDirectory = async (): Promise<string | null> => {
-    if (typeof workspace?.pickDirectory === 'function') {
-      return workspace.pickDirectory();
+    const workspaceNow = workspace ?? readService<WorkspaceFacade>('uiWorkspace');
+    if (typeof workspaceNow?.pickDirectory === 'function') {
+      try {
+        return await workspaceNow.pickDirectory();
+      } catch (error) {
+        // 官方入口自身失败（服务重组、宿主不支持等）不应把内部错误直接抛给用户，
+        // 记一条诊断后走 Remote 兜底。
+        console.warn('[notes] uiWorkspace.pickDirectory 失败，改用 Remote 兜底', error);
+      }
     }
 
-    if (typeof remote?.directoryPicker?.pick === 'function') {
-      return remote.directoryPicker.pick();
+    const pickerNow =
+      directoryPicker ?? readService<PickDirectoryFacade>('remote.directoryPicker');
+    if (typeof pickerNow?.pick === 'function') {
+      const picked = await pickerNow.pick();
+      // Remote 可能返回裸字符串，也可能返回 { ok, value } 信封，两种都兼容。
+      if (typeof picked === 'string') return picked;
+      if (picked && typeof picked === 'object' && 'value' in picked) {
+        const value = (picked as { value?: unknown }).value;
+        if (typeof value === 'string') return value;
+      }
+      return null;
     }
 
     throw new Error('当前环境不支持选择文件夹');

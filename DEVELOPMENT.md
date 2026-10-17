@@ -12,8 +12,11 @@
 |---|---|---|
 | 打包脚本删掉了具名 import 却没生成绑定 | `useState` 等为 undefined，**面板完全渲染不出来** | 生成解构绑定；各模块包 IIFE 隔离作用域，避免同名符号冲突 |
 | 状态写盘走 400ms 防抖 | 400ms 内刷新会丢 tab / 置顶 | 结构性变更立即落盘 + `pagehide`/`visibilitychange` 补写 |
-| 未声明 `dsh-client-ui-workspace` 依赖 | `ctx.get('uiWorkspace')` 拿不到，**选文件夹点了没反应** | 在 `dsh.client.inject` 中声明；并补 Remote 客户端退路 |
-| 退路用裸 `fetch` 打 Remote 路由 | 被 Remote 判为 `gateway/bad-request` | 改走生成的 `ctx.remote.directoryPicker.pick()` |
+| 未声明 `dsh-client-ui-workspace` 依赖 | `ctx.get('uiWorkspace')` 拿不到，**选文件夹点了没反应** | 在 `dsh.client.inject` 中声明模块依赖；服务本身仍要在运行期**可选**获取（见下方条目） |
+| 退路用裸 `fetch` 打 Remote 路由 | 被 Remote 判为 `gateway/bad-request` | 改走官方入口 `uiWorkspace.pickDirectory()` |
+| 把 `ctx.remote.directoryPicker` 属性访问当能力探测 | 崩在兜底路径：`cannot get property "remote.directoryPicker" without inject`，用户点「选择文件夹」直接弹这句内核错误 | **属性访问受 inject 门控，探测本身就会抛**。改用 `ctx.get('remote.directoryPicker')` —— gateway 用 `remoteServiceKey(ns) = \`remote.${ns}\`` 把这些命名空间注册成**普通服务**，自己也是用 `ownerCtx.get(serviceKey)` 访问的。拿不到只是该能力不可用，不崩 |
+| 服务快照只在 apply 期取一次 | `uiWorkspace` 由官方包注册，本插件 apply 可能早于它 → 快照为 `null`，兜底路径又被上一条炸掉 | 每个能力都用「快照 → 调用时刻再 `get` 一次」两级取法，并用 `try/catch` 兜住查找本身 |
+| `uiWorkspace.pickDirectory()` 失败时把原始错误抛给用户 | 用户看到的是内核异常文案 | 包住并降级到 Remote 直连，原错误只进 `console.warn` |
 | 同步滚动用「记住上次谁在驱动」的持久标记 | 会把下一次真实滚动一起吞掉，**只有一个方向能同步** | 改为给被程序写入的一方打一次性回声标记，写入后立刻消费 |
 | `setScroll` 每次滚动都 commit | 每滚一像素触发一次面板重渲染 | 滚动位置改为静默更新内存 + 防抖落盘，不通知订阅者 |
 | 文件夹栏固定 232px，不随面板变化 | 会话栏折叠/窗口变窄时，左栏吃掉一半宽度，**路径按钮被压住、正文被逐字折断** | 用 `ResizeObserver` 观察面板宽度，窄容器下收起左栏并改为上下堆叠 |
