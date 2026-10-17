@@ -182,3 +182,41 @@ health 返回 `ok`、`canDelete` 为布尔、`platform` 等于宿主 `process.pl
     于是新路由 404。面板其余功能（list/read/health 等旧路由）照常，所以只有更新控件报 404。
 - 改善：把这句 404 翻译成可执行提示 —— 「宿主半边还没提供查版本的接口（客户端已更新、宿主未重启），请完全退出并重开 DSH」，
   并对其它错误保持原文不改写。客户端 API 单测 5/5（成功路径、默认不带 fresh、fresh=true 带查询串、404 翻译、502 保留原文）。
+
+## 0.1.6：选择文件夹崩溃（cordis inject 门控）
+
+**现象**：点「选择文件夹」弹出
+`选择文件夹失败：cannot get property "remote.directoryPicker" without inject`。
+提示原文来自面板 `chooseFolder` 的 catch（`flash(\`选择文件夹失败：${messageOf(error)}\`)`），
+错误本身来自 `pickDirectory` 的兜底分支。
+
+**排查（两层根因）**
+- 第一层：兜底分支把 `typeof remote?.directoryPicker?.pick === 'function'` 当作**能力探测**。
+  `remote` 是 cordis 的 Service 门面，对未写进 inject 的命名空间做**属性门控**，读取即抛 ——
+  探测这个动作本身就是错误来源。证据：`dsh-api-remotes` 的命名空间是
+  `ownerCtx.plugin({ name: remoteServiceKey(ns) })` 注册的**服务**，而
+  `remoteServiceKey(namespace)` 的实现是 `` `remote.${namespace}` ``（`dsh-api-gateway/lib/client.browser.js`），
+  gateway 自身检查冲突用的就是 `this.ownerCtx.get(serviceKey)` —— `ctx.get` 才是访问正路。
+- 第二层：`uiWorkspace` 的 `pickDirectory()` 才是首选路径，但它的快照只在 `apply` 期取一次。
+  官方 `dsh-client-ui-workspace` 注册该服务的时机可以晚于本插件的 apply，快照为 `null`，
+  于是落到那条会炸的兜底上。旁证：官方包的 inject 里含 `remote.directoryPicker`，
+  所以它能直接属性访问；本插件没声明，就必须走 `ctx.get`。
+
+**修复**
+- 能力探测改用 `ctx.get('remote.directoryPicker')`，不再属性访问。
+- 每个能力「apply 期快照 → 调用时再 `get` 一次」两级，两处都 `try/catch`（查找本身抛错也当没有）。
+- `uiWorkspace.pickDirectory()` 失败时降级到 Remote 直连，原错误只进 `console.warn`，不外抛。
+- 两者都不可用时给可读的「当前环境不支持选择文件夹」。
+
+**验证**
+- 桩按真实门控语义构造：先证明桩能复现同一句 cordis 错误，再验证修复。
+  9/9 通过：两者皆无→可读提示、无 workspace 有 remote→Remote 兜底（旧代码在此崩溃）、
+  workspace 抛错→降级、workspace 正常→用之、`{ok,value}` 信封、取消→null、
+  **apply 时无 workspace 调用时才有**、**apply 时无 remote 调用时才有**。
+- 回归：Host 21/21、文件树 16/16、更新逻辑 30/30、客户端 API 错误 5/5、查版本 5/5、加载 6 个副作用可释放。
+- 已发布包 `0.1.6` 下载核验：`pickDirectory` 实现里已无任何 `remote.directoryPicker` 属性访问，
+  走 `readService('remote.directoryPicker')`；`lib/index.js` 与 0.1.5 **逐字节相同**（本次只改客户端，
+  升级后刷新页面即可，无需重启 DSH）。
+
+**如实说明**：本机 DSH 未开远程调试端口，**未能连上真实 GUI 复现点击**。上述 9/9 是等价语义的桩验证，
+外加代码路径与官方实现的双向证据；真实点击确认留待用户刷新页面后反馈。
