@@ -132,6 +132,26 @@ ln -sfn ~/dsh-notes-plugin node_modules/dsh-client-ui-notes
 > 用 `link:` 装的插件，**改了 `lib/` 下的产物必须重启 DSH** 才会生效：客户端产物是启动时
 > 读取并缓存的，磁盘文件变化不会自动重载。
 
+## 更新
+
+三条路都能升级，效果一样：
+
+| 方式 | 怎么用 |
+|---|---|
+| 插件详情页的「更新」 | 侧栏「插件」→ 点本插件卡片 → 顶部按钮。发现新版本后点一下即升（**0.1.7 起才真正可用**） |
+| 插件市场 | 市场里搜到本插件后点「更新」 |
+| 命令行 | `dsh plugin --profile <名字> add dsh-client-ui-notes@latest` |
+
+每个版本改了什么见 [CHANGELOG](./CHANGELOG.md)。
+
+> **从 0.1.6 及更早升上来时，详情页的「更新」按钮必然失败**：带 HMR 的宿主会在跑
+> pnpm 之前就以 `already-installed` 拒绝「覆盖安装自己」，而旧版本正是这么做的。
+> 需要**手动升级一次**（市场或插件页装到 0.1.7+），之后这个按钮才通。
+>
+> 手动升级若被 pnpm 的 `minimumReleaseAge`（新版本观察期）拦下，用**插件市场**装：
+> 它会自动往 profile 的 `minimumReleaseAgeExclude` 追加放行规则，失败还会带
+> `--config.minimum-release-age=0` 重试一次；插件页那条路没有这两个兜底。
+
 ## 工程结构
 
 ```

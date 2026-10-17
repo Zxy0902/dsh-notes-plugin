@@ -14,8 +14,10 @@
       "types": "./lib/client/index.d.ts",
       "default": "./lib/client.js"
     },
+    "./locale/*": "./locale/*",
     "./package.json": "./package.json"
   },
+  "icon": "./icon.svg",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Zxy0902/dsh-notes-plugin.git"
@@ -43,7 +45,10 @@
     "lib/client.js.map",
     "lib/client/**/*.d.ts",
     "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "DEVELOPMENT.md",
     "VERIFICATION.md"

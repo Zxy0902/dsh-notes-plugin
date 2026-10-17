@@ -78,5 +78,5 @@ data/plugins/Zxy0902__dsh-notes-plugin.yml
 | 仓库创建满 1 天 | ✅ 2026-10-17T09:29:09Z 已满（等 `regate` 重跑放行） |
 | 加 `dsh-plugin` topic | ✅ |
 | 描述不含营销词、且与代码相符 | ✅ 逐条对照过源码（删除行为据 `moveToTrash` 精确表述） |
-| 已发 npm（预构建安装免 `allowBuilds` 授权） | ✅ `dsh-client-ui-notes@0.1.6` |
+| 已发 npm（预构建安装免 `allowBuilds` 授权） | ✅ `dsh-client-ui-notes@0.1.8` |
 | 官方 `@deepseek-ai/*` 用 `peerDependencies` 声明 | ✅ |
