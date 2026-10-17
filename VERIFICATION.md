@@ -218,5 +218,8 @@ health 返回 `ok`、`canDelete` 为布尔、`platform` 等于宿主 `process.pl
   走 `readService('remote.directoryPicker')`；`lib/index.js` 与 0.1.5 **逐字节相同**（本次只改客户端，
   升级后刷新页面即可，无需重启 DSH）。
 
-**如实说明**：本机 DSH 未开远程调试端口，**未能连上真实 GUI 复现点击**。上述 9/9 是等价语义的桩验证，
-外加代码路径与官方实现的双向证据；真实点击确认留待用户刷新页面后反馈。
+**真实环境确认**：2026-10-17 用户刷新页面后点击「选择文件夹」，**正常弹出系统选择窗口**。
+这也补上了桩验证无法证明的一环：`ctx.get('remote.directoryPicker')` 确实能看到 gateway 用
+`ownerCtx.plugin({ name: remoteServiceKey(ns) })` 单独注册的命名空间服务。
+源码依据：cordis 的门控只挂在 Context Proxy 的 `get` trap 上，而 `ReflectService.get()` →
+`_getImpl()` 查不到时返回 `undefined` 而非抛错（`cordis/src/reflect.ts`）。
