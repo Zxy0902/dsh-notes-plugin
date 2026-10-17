@@ -134,9 +134,11 @@ export class NotesApi {
    * 两者不同步时这里必然 404，直接说清楚比丢个状态码让用户猜有用。
    *
    * @param fresh - true 时绕过宿主端 5 分钟缓存（用户手动点「重新检查」）。
-   * @returns 包名与最新版本号。
+   * @returns 包名、最新版本号，以及该版本的 tarball 直链（宿主 0.1.7 起提供）。
    */
-  async latestVersion(fresh = false): Promise<{ ok: true; name: string; version: string }> {
+  async latestVersion(
+    fresh = false,
+  ): Promise<{ ok: true; name: string; version: string; tarball?: string }> {
     try {
       return await this.request(`${API.latestVersion}${fresh ? '?fresh=1' : ''}`);
     } catch (error) {

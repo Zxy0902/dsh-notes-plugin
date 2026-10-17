@@ -537,7 +537,12 @@ export function apply(ctx: ClientContext): void {
                */
               checkLatest: async (fresh: boolean) => {
                 const result = await api.latestVersion(fresh);
-                return { name: result.name, version: result.version };
+                // tarball 一并透传：升级靠它覆盖安装，`包名@版本` 会被带 HMR 的宿主拒绝。
+                return {
+                  name: result.name,
+                  version: result.version,
+                  tarball: result.tarball,
+                };
               },
             }),
           },

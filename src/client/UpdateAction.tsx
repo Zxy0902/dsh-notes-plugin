@@ -77,9 +77,14 @@ export interface UpdateActionProps {
    * 返回宿主自己读出来的**包名**一并带上：插件被改名/复刻后，规格仍指向它自己。
    *
    * @param fresh - true 时绕过宿主端缓存。
-   * @returns 包名与最新版本号；失败时抛出带可读原因的异常。
+   * @returns 包名、最新版本号，以及该版本的 tarball 直链（宿主 0.1.7 起提供；
+   *          缺省时退回 `包名@精确版本` 的规格）；失败时抛出带可读原因的异常。
    */
-  checkLatest?: (fresh: boolean) => Promise<{ name: string; version: string }>;
+  checkLatest?: (fresh: boolean) => Promise<{
+    name: string;
+    version: string;
+    tarball?: string;
+  }>;
   /** 问宿主：当前是不是本地链接安装。 */
   probeLocalInstall?: () => Promise<boolean>;
 }
@@ -163,6 +168,8 @@ function codeText(code: string | undefined): string | null {
       return '包完整性校验失败';
     case 'build-blocked':
       return '安装脚本需要先在插件页批准';
+    case 'already-installed':
+      return '宿主拒绝覆盖安装已安装的同名包（带 HMR 的宿主有此限制），请在侧栏「插件」页或插件市场里更新';
     case 'management-required':
       return '当前 profile 不允许由插件管理安装';
     case 'unaddressable':
@@ -218,6 +225,16 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
    * 用它而不是写死的常量去拼安装规格：插件被改名/复刻后依然指向自己。
    */
   const [remoteName, setRemoteName] = useState<string | null>(null);
+  /**
+   * 最新版本的 tarball 直链（宿主 0.1.7 起随查版本一起返回）。
+   *
+   * 升级**优先**用它而不是 `包名@版本`：宿主装了 HMR 之后，`installBundle` 会在
+   * 跑 pnpm 之前就对「spec 指明已安装包」的请求抛 `already-installed`
+   * （0.2.1-rc.2 起）—— 用它去覆盖安装**自己**，必然 100% 失败。
+   * tarball 规格解析不出包名，那道检查不触发；pnpm 的 `minimumReleaseAge`
+   * 也只按 registry 版本判定，不作用于 URL 依赖。
+   */
+  const [remoteTarball, setRemoteTarball] = useState<string | null>(null);
 
   const check = useCallback(
     async (fresh = false) => {
@@ -226,6 +243,7 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
       try {
         const latest = await props.checkLatest(fresh);
         setRemoteName(latest.name);
+        setRemoteTarball(latest.tarball ?? null);
         if (installed !== null && isNewerVersion(latest.version, installed)) {
           setPhase({ name: 'outdated', version: latest.version });
           return;
@@ -247,14 +265,18 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
         // 【必须显式传满 2 个业务参数】gateway 按 descriptor 严格校验个数：
         // `installBundle(spec, options)`，第三个参数才是可选 AbortSignal。
         //
-        // 规格用**精确版本**而不是 `@latest`：用户确认的是界面上那个版本号，
-        // 万一确认与执行之间又发了新版，也不该装一个他没见过的版本。
-        // 包名用宿主读出来的自身包名（拿不到时退回契约里声明的名字）。
+        // 【规格怎么选】优先用宿主给的 **tarball 直链**：宿主一旦装了 HMR，
+        // 指向已安装包的 `包名@版本` 会在跑 pnpm 之前就被 `already-installed`
+        // 拒掉；tarball 解析不出包名，那道检查不触发。只有在宿主还没升级到
+        // 会返回 tarball 的版本时才退回 `包名@精确版本`（那种旧宿主上没有那道检查）。
+        // 用精确版本而不是 `@latest`：用户确认的是界面上那个版本号，万一确认与
+        // 执行之间又发了新版，也不该装一个他没见过的版本。
         const name = remoteName ?? pkg?.name ?? SELF_PACKAGE;
+        const spec = remoteTarball ?? `${name}@${version}`;
         // enabled: true —— 本插件正在运行（说明它本来就是启用状态），升级后保持启用。
         // 不传 approvedBuilds：安装脚本是否放行交给用户在插件页自己决定。
         const requestId = `notes-update-${Date.now().toString(36)}`;
-        const answer = await manager.installBundle(`${name}@${version}`, {
+        const answer = await manager.installBundle(spec, {
           enabled: true,
           requestId,
         });
@@ -292,7 +314,7 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
         setPhase({ name: 'error', message: errorText(error, '更新失败') });
       }
     },
-    [manager, remoteName, pkg?.name],
+    [manager, remoteName, remoteTarball, pkg?.name],
   );
 
   // 只在属于自己的页面、且两项能力都在时才工作：

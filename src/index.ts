@@ -158,6 +158,15 @@ interface LatestVersion {
   name: string;
   /** `latest` dist-tag 指向的版本。 */
   version: string;
+  /**
+   * 该版本的 tarball 直链（npm 元数据里的 `dist.tarball`）。
+   *
+   * 「一键更新」必须用它，不能用 `包名@版本`：宿主一旦装了 HMR，`installBundle`
+   * 会在跑 pnpm 之前就以 `already-installed` 拒绝「spec 指明已安装包」的请求
+   * （0.2.1-rc.2 起）。tarball 规格解析不出包名，那道检查不触发；pnpm 的
+   * `minimumReleaseAge` 也只按 registry 版本判定，不作用于 URL 依赖。
+   */
+  tarball?: string;
 }
 
 /**
@@ -211,8 +220,11 @@ async function latestPublishedVersion(logger: Logger, fresh: boolean): Promise<L
   }
 
   let version: unknown;
+  let tarball: unknown;
   try {
-    version = ((await response.json()) as { version?: unknown }).version;
+    const body = (await response.json()) as { version?: unknown; dist?: { tarball?: unknown } };
+    version = body.version;
+    tarball = body.dist?.tarball;
   } catch {
     throw new HttpError(502, 'npm 返回的内容无法解析');
   }
@@ -220,7 +232,12 @@ async function latestPublishedVersion(logger: Logger, fresh: boolean): Promise<L
     throw new HttpError(502, 'npm 没有给出该包的版本号');
   }
 
-  const value: LatestVersion = { name, version };
+  const value: LatestVersion = {
+    name,
+    version,
+    // 只接受 https 直链：客户端会把它交给 pnpm 当安装规格，来源必须可信。
+    ...(typeof tarball === 'string' && tarball.startsWith('https://') ? { tarball } : {}),
+  };
   latestCache = { at: Date.now(), value };
   return value;
 }
