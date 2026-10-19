@@ -188,6 +188,10 @@ const CSS = `
 /* 夹在置顶区与文件树之间。下拉用绝对定位浮在树上方，不挤动树的布局。 */
 .dsh-notes__search {
   position: relative;
+  /* 必须在文件树之上：下拉是绝对定位的浮层，而树在 DOM 里排在后面，
+     不给这里抬层级的话，树会画在浮层上面 —— 表现为「候选条目被树压着、
+     两层文字重叠」。 */
+  z-index: 5;
   padding: 6px 10px 2px;
   flex: 0 0 auto;
 }
@@ -246,7 +250,12 @@ const CSS = `
   padding: 4px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 8px;
-  background: var(--dsw-alias-bg-elevated);
+  /* 【必须是不透明的实心底色】浮层压在文件树上，背景若透明/未定义，
+     树里的文字会直接透上来和候选条目糊在一起（曾经误用了不存在的
+     --dsw-alias-bg-elevated，变量没定义 → 背景透明 → 两层文字重叠）。
+     bg-overlay 就是 DSH 给 popover 用的那一层，本身是不透明色；
+     bg-layer-1 兜底，保证任何主题下都不会透字。 */
+  background: var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, #ffffff));
   box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
 }
 .dsh-notes__search-item {
@@ -807,7 +816,7 @@ const CSS = `
   align-items: center;
   justify-content: center;
   border-radius: 14px;
-  background: var(--dsw-alias-bg-elevated, rgba(0, 0, 0, 0.04));
+  background: var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, #ffffff)));
   margin-bottom: 4px;
 }
 .dsh-notes__external-title {
@@ -838,7 +847,7 @@ const CSS = `
   display: inline-flex;
   align-items: stretch;
   height: 28px;
-  border: 1px solid var(--dsw-alias-border-secondary, rgba(0, 0, 0, 0.12));
+  border: 1px solid var(--dsw-alias-border-l2));
   border-radius: 7px;
   background: var(--dsw-alias-bg-base, #fff);
   overflow: hidden;
@@ -866,12 +875,12 @@ const CSS = `
   padding: 0;
   background: transparent;
   border: 0;
-  border-left: 1px solid var(--dsw-alias-border-secondary, rgba(0, 0, 0, 0.12));
+  border-left: 1px solid var(--dsw-alias-border-l2));
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
 }
 .dsh-notes__openwith-main:hover,
-.dsh-notes__openwith-caret:hover:not(:disabled) { background: var(--dsw-alias-bg-hover, rgba(0, 0, 0, 0.05)); }
+.dsh-notes__openwith-caret:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover)); }
 .dsh-notes__openwith-main:disabled,
 .dsh-notes__openwith-caret:disabled { cursor: default; }
 
@@ -889,7 +898,7 @@ const CSS = `
   overflow-y: auto;
   padding: 5px;
   border-radius: 10px;
-  border: 1px solid var(--dsw-alias-border-secondary, rgba(0, 0, 0, 0.08));
+  border: 1px solid var(--dsw-alias-border-l2));
   background: var(--dsw-alias-bg-overlay, #fff);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
   text-align: left;
@@ -909,9 +918,9 @@ const CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dsh-notes__openwith-item:hover:not(:disabled) { background: var(--dsw-alias-bg-hover, rgba(0, 0, 0, 0.05)); }
+.dsh-notes__openwith-item:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover)); }
 .dsh-notes__openwith-item:disabled { color: var(--dsw-alias-label-tertiary, rgba(0, 0, 0, 0.35)); cursor: default; }
-.dsh-notes__openwith-sep { height: 1px; margin: 5px 6px; background: var(--dsw-alias-border-secondary, rgba(0, 0, 0, 0.08)); }
+.dsh-notes__openwith-sep { height: 1px; margin: 5px 6px; background: var(--dsw-alias-border-l2)); }
 .dsh-notes__openwith-loading {
   padding: 7px 10px;
   font-size: 12px;
