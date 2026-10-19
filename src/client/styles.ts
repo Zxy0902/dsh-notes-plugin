@@ -244,6 +244,21 @@ const CSS = `
   cursor: default;
 }
 
+/* 点刷新后的旋转反馈：让「重新读取」这个动作看得见。
+   减少动态效果模式下不动画，避免对前庭敏感用户造成不适。 */
+.dsh-notes__treebtn--spin svg {
+  animation: dsh-notes-spin .48s ease-in-out;
+}
+@keyframes dsh-notes-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dsh-notes__treebtn--spin svg {
+    animation: none;
+  }
+}
+
 /* 定位到文件后的短暂高亮：与 hover/active 区分开，用品牌色描边闪一下 */
 .dsh-notes__node--located {
   background: color-mix(in srgb, var(--dsw-alias-brand-primary) 14%, transparent);

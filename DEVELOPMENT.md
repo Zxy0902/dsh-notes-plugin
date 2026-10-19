@@ -68,6 +68,7 @@
 | 新增客户端模块后运行时报 `__modX is not defined` | 构建成功、`node --check` 也通过，但一加载就抛 `ReferenceError: __modUpdateAction is not defined` | `scripts/build-client.mjs` 里的 `MODULES` 是**显式清单**：新加的 `src/client/*.ts` 不进这份清单，打包产物就缺少对应的模块表项。**新增客户端模块必须同时把它登记进 `MODULES`**（顺序按依赖，被依赖者在前）。这次加 `UpdateAction.tsx` 与 `treeOps.ts` 都踩了一遍，靠「构建后跑一次真实加载（`/tmp/loadtest.mjs`）」立刻暴露 —— 只做类型检查与语法检查是发现不了的 |
 | 面板顶部区域的鼠标事件被系统吞掉 | 侧栏下半部的文件树拖拽一直正常，只有最上方的置顶区拖不动 —— **越靠上越坏** | DSH 在 macOS 上把带 `data-window-drag` 的元素设为**窗口拖拽区**（`html[data-platform=darwin] [data-window-drag]{-webkit-app-region:drag}`），该区域内的鼠标事件由系统接管、页面收不到；DSH 主面板里的入口型页面（如插件管理器）靠**约 48px 顶部内边距**避开这条带子，而本插件顶部只留了 14px。**修法：面板根节点加 `data-window-drag-recall`**（DSH 自己提供的退出标记，对应 `-webkit-app-region: no-drag`），只作用于本面板，不影响 DSH 其他区域 |
 | 保存只清草稿、不推进文件基线 `loaded` | 点保存后**界面回滚成保存前的内容**（文件其实已写对），切换文件再切回才显示新内容 | 编辑器显示 `draft ?? loaded`，而 `loaded` 是**打开文件时**读到的那份；清掉草稿后显示退回旧基线。改为保存成功后先 `setLoaded(刚写入的内容)`、再 `clearDraft`，两步之间没有空档。11 条行为断言（含「改回原样再存」边界）全过 |
+| 文件树只在插件自己的增删改后刷新 | 用外部编辑器改了文件名/增删文件后，**树里一直留着旧条目**，只能切走再切回 | 增 `treeRevision` 令牌只在插件内部动作时递增。补两条外部刷新路径：窗口重新获得焦点/标签页重新可见时自动刷新（800ms 节流、隐藏页跳过），以及树头的手动刷新按钮；两者都只重列已展开目录，保留展开与滚动 |
 
 ## 不可预览文件（打开方式）
 

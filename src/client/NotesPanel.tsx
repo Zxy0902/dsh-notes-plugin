@@ -92,6 +92,16 @@ function IconUnfoldLess({ size = 13 }: { size?: number }): JSX.Element {
   );
 }
 
+/** 刷新图标：带箭头的开口圆环（Material 的 refresh 语义 = 重新读取）。 */
+function IconRefresh({ size = 13 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} aria-hidden="true">
+      <path d="M13.4 8a5.4 5.4 0 1 1-1.6-3.8" />
+      <path d="M13.6 1.8v3.2h-3.2" />
+    </svg>
+  );
+}
+
 /** 加号。 */
 function IconPlus(): JSX.Element {
   return (
@@ -406,6 +416,64 @@ export function NotesPanel({
     }
   }, [api, pendingDelete, state.root, store, flash]);
 
+  /** 刷新按钮的短暂旋转反馈（只是视觉提示，不参与刷新逻辑）。 */
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /**
+   * 重新读取文件树。
+   *
+   * 递增 `treeRevision` 会让每个**已展开**的目录节点重新列自己那一层，
+   * 展开状态与滚动位置都保留 —— 所以这是「原地刷新」，不是重建整棵树。
+   */
+  const refreshTree = useCallback(() => {
+    store.refreshTree();
+    setRefreshing(true);
+    if (refreshTimer.current !== null) clearTimeout(refreshTimer.current);
+    // 与旋转动画时长对齐，给用户一个「点了确实有反应」的反馈。
+    refreshTimer.current = setTimeout(() => setRefreshing(false), 480);
+  }, [store]);
+
+  useEffect(
+    () => () => {
+      if (refreshTimer.current !== null) clearTimeout(refreshTimer.current);
+    },
+    [],
+  );
+
+  /**
+   * 切回窗口或标签页时自动刷新文件树。
+   *
+   * 解决的是最常见的那种「树过期」：用外部编辑器（VSCode、备忘录、终端）改了
+   * 文件名或增删文件，DSH 收不到任何通知，树里就留着旧条目。
+   * 用户改完切回来，这一眼看到的应该是最新的磁盘状态。
+   *
+   * 刻意**不用定时轮询**：目录大时会持续打请求，还会打断正在进行的展开操作。
+   * 也刻意不用宿主 `fs.watch`：跨平台（尤其 Windows）可靠性差，且要新增推送通道，
+   * 对「切回来更新一下」这个需求来说过度了。
+   */
+  useEffect(() => {
+    /** 上次自动刷新的时间，用来合并密集的 focus/visibilitychange 事件。 */
+    let last = 0;
+    const AUTO_REFRESH_MS = 800;
+
+    const refreshIfStale = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      // 切标签页再切回来会连着触发 visibilitychange + focus，合并成一次。
+      if (now - last < AUTO_REFRESH_MS) return;
+      last = now;
+      store.refreshTree();
+    };
+
+    window.addEventListener('focus', refreshIfStale);
+    document.addEventListener('visibilitychange', refreshIfStale);
+    return () => {
+      window.removeEventListener('focus', refreshIfStale);
+      document.removeEventListener('visibilitychange', refreshIfStale);
+    };
+  }, [store]);
+
   /** 从置顶区打开文件。 */
   const openPinned = useCallback(
     (path: string) => {
@@ -454,6 +522,8 @@ export function NotesPanel({
           api={api}
           store={store}
           treeRevision={state.treeRevision}
+          onRefreshTree={refreshTree}
+          refreshing={refreshing}
           root={state.root}
           pinned={state.pinned}
           expanded={state.expanded}
@@ -593,6 +663,10 @@ interface SidebarProps {
   store: NotesStore;
   /** 文件树刷新令牌；变化即重新列目录。 */
   treeRevision: number;
+  /** 手动重新读取整棵文件树（外部改动后使用）。 */
+  onRefreshTree: () => void;
+  /** 刚点过刷新、旋转反馈未结束。 */
+  refreshing: boolean;
   root: string;
   pinned: string[];
   expanded: string[];
@@ -966,8 +1040,21 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
       <div className="dsh-notes__treehead">
         <span className="dsh-notes__treehead-label">文件</span>
 
-        {/* 树操作：定位当前文件 / 全部展开 / 全部收起。放在可见范围开关左侧，
-            三个都是「对树本身的动作」，与「树显示什么」的开关分开。 */}
+        {/* 树操作：刷新 / 定位当前文件 / 全部展开 / 全部收起。放在可见范围开关左侧，
+            这些都是「对树本身的动作」，与「树显示什么」的开关分开。 */}
+        <button
+          type="button"
+          className={
+            props.refreshing
+              ? 'dsh-notes__treebtn dsh-notes__treebtn--spin'
+              : 'dsh-notes__treebtn'
+          }
+          title="重新读取文件树（在外部改了文件后点这里）"
+          aria-label="刷新文件树"
+          onClick={props.onRefreshTree}
+        >
+          <IconRefresh />
+        </button>
         <button
           type="button"
           className="dsh-notes__treebtn"
