@@ -1922,12 +1922,22 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** 保存：把草稿写回磁盘。 */
+  /**
+   * 保存：把草稿写回磁盘。
+   *
+   * 【顺序很重要】编辑器显示的是 `draft ?? loaded`，`loaded` 是**打开文件时**读到的
+   * 那份内容。清掉草稿后 `draft` 变 undefined，显示就会退回 `loaded` —— 也就是
+   * 保存前的旧内容，表现为「点保存后界面回滚，切换文件再回来才正常」。
+   * 所以必须先把 `loaded` 推进到刚写入的新内容，再清草稿，两步之间没有空档。
+   */
   const save = useCallback(async () => {
     if (tab.path === null || !dirty || saving) return;
     setSaving(true);
     try {
-      await api.write(root, tab.path, store.getSnapshot().drafts[tab.id] ?? '');
+      const content = store.getSnapshot().drafts[tab.id] ?? '';
+      await api.write(root, tab.path, content);
+      // 先更新基线，再清草稿：否则中间那一帧会显示旧内容。
+      setLoaded(content);
       store.clearDraft(tab.id);
       props.onNotice('已保存');
     } catch (cause) {

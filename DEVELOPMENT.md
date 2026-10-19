@@ -67,6 +67,7 @@
 | 想用某个 Remote 命名空间，又怕声明进 inject 会拖垮加载 | 需要 `remote.pluginManager`（官方插件页同款能力），但写进 `inject` 后在缺该服务的环境（精简 profile / 无插件管理器的版本）**整个插件都不会加载** | 两条规则要分清：① **属性访问** `ctx.remote.<ns>` 受 fiber 的 inject 门禁，不声明必抛 `cannot get property ... without inject`；② **按名查找** `ctx.get('remote.<ns>')` 不受该门禁限制。而 gateway 是用 `ownerCtx.plugin({ name: remoteServiceKey(ns) })` 把命名空间注册成**网关根下的普通服务**（全局可见），所以 `ctx.get` 能取到。同时本版本 cordis 的 `_refresh()` 要求 inject 里每个服务都在位，**没有「可选 inject」** —— 因此需要「有就用、没有就降级」的能力时，一律走 `ctx.get` + try/catch，不要写进 inject。（`remote.session` 属于「没有它功能就不成立」，才适合写进 inject。） |
 | 新增客户端模块后运行时报 `__modX is not defined` | 构建成功、`node --check` 也通过，但一加载就抛 `ReferenceError: __modUpdateAction is not defined` | `scripts/build-client.mjs` 里的 `MODULES` 是**显式清单**：新加的 `src/client/*.ts` 不进这份清单，打包产物就缺少对应的模块表项。**新增客户端模块必须同时把它登记进 `MODULES`**（顺序按依赖，被依赖者在前）。这次加 `UpdateAction.tsx` 与 `treeOps.ts` 都踩了一遍，靠「构建后跑一次真实加载（`/tmp/loadtest.mjs`）」立刻暴露 —— 只做类型检查与语法检查是发现不了的 |
 | 面板顶部区域的鼠标事件被系统吞掉 | 侧栏下半部的文件树拖拽一直正常，只有最上方的置顶区拖不动 —— **越靠上越坏** | DSH 在 macOS 上把带 `data-window-drag` 的元素设为**窗口拖拽区**（`html[data-platform=darwin] [data-window-drag]{-webkit-app-region:drag}`），该区域内的鼠标事件由系统接管、页面收不到；DSH 主面板里的入口型页面（如插件管理器）靠**约 48px 顶部内边距**避开这条带子，而本插件顶部只留了 14px。**修法：面板根节点加 `data-window-drag-recall`**（DSH 自己提供的退出标记，对应 `-webkit-app-region: no-drag`），只作用于本面板，不影响 DSH 其他区域 |
+| 保存只清草稿、不推进文件基线 `loaded` | 点保存后**界面回滚成保存前的内容**（文件其实已写对），切换文件再切回才显示新内容 | 编辑器显示 `draft ?? loaded`，而 `loaded` 是**打开文件时**读到的那份；清掉草稿后显示退回旧基线。改为保存成功后先 `setLoaded(刚写入的内容)`、再 `clearDraft`，两步之间没有空档。11 条行为断言（含「改回原样再存」边界）全过 |
 
 ## 不可预览文件（打开方式）
 
