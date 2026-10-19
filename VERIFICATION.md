@@ -223,3 +223,133 @@ health 返回 `ok`、`canDelete` 为布尔、`platform` 等于宿主 `process.pl
 `ownerCtx.plugin({ name: remoteServiceKey(ns) })` 单独注册的命名空间服务。
 源码依据：cordis 的门控只挂在 Context Proxy 的 `get` trap 上，而 `ReflectService.get()` →
 `_getImpl()` 查不到时返回 `undefined` 而非抛错（`cordis/src/reflect.ts`）。
+
+-----
+
+## 技能浏览（未发布）
+
+**目标**：不自己扫盘、不自己解析 `SKILL.md`，把 DSH 官方 skill 注册表的目录复用到笔记面板里，
+点开即可在现有阅读器中看正文。只读。
+
+**做法**
+- 宿主新增 `GET /api/dsh-notes/skills`，数据来自 `ctx.skills`（官方 `@deepseek-ai/dsh-skill` 注册表），
+  优先用 `snapshot()`（带 `complete` 标记），退到 `list()`。
+- 注册表与会话表**不写进 `inject`**，一律 `ctx.get()` 可选获取：某环境没有 skill 插件时，
+  入口显示一句提示，笔记本身完全不受影响（写进 inject 会连坐整个插件不加载）。
+- 正文复用现成的 `/api/dsh-notes/read`：打开技能时把「根」切到 `dirname(SKILL.md)`，
+  围栏照常生效。
+
+**验证**（全部跑编译后的 `lib/`，注册表与提供方用的是**真实的** `dsh-skill` + `dsh-skill-filesystem`）
+
+| 套件 | 结果 | 覆盖 |
+|---|---|---|
+| `skilltest` | 26 / 26 | 真实注册表读到本机 3 个用户技能、按名排序、`path` 指向 `SKILL.md`、`invocation.modelInvocable` 取法（`quick-look` 判定为仅手动）；缺注册表 / `list` 返回 undefined / 注册表抛错三种降级；路由 200、字段齐全、非 loopback 403、非 GET 405、非 loopback Host 403、无注册表时 200 + `available:false` |
+| `skille2e` | 7 / 7 | 三个真实技能的 `SKILL.md` 都能用「技能目录当根」通过 `read` 路由读到正文（4383 / 7357 / 1442 字符）；同时 `/etc/hosts` 仍被 403 拒绝 —— 围栏没有因为换了根而失效 |
+| `icontest` | 6 / 6 | 临时技能根里 `assets/icon.png` 与根目录 `other.svg` 都被发现、MIME 正确、非图片文件不被当图标 |
+| `skillwire` | 18 / 18 | 客户端打包含新路由、全部新类名与文案；未引入任何 Node/宿主模块；宿主 bundle 无 `@deepseek-ai/dsh-skill` 静态依赖、且确实通过 `ctx.get` 取服务 |
+
+**回归**：13 个既有套件全绿（host 21、tree 16、pick 9、apierr 5、latest 7、update 32、meta 10、
+save 11、refresh 17、search 12、searchwire 23、token 4、flash 11），共 **190** 条断言。
+
+**未做真实 GUI 截图验证**：本机沙箱内 Chrome headless 无法启动
+（`sandbox initialization failed: Operation not permitted`），因此界面层只有静态断言与
+类型检查，交互效果以用户实际使用为准。
+
+**第二轮修正（用户实测反馈：只看到内置技能、点了打不开）**
+
+实测截图显示列表里全是 `office-*` 且都标「无文件」、点了只弹一句提示（且这是**任何已发布版本都没有的**新提示，说明新代码已生效）。
+
+原因：技能有两类形状。文件提供方（`dsh-skill-filesystem`）给的候选带 `path`（`SKILL.md` 绝对路径）；
+**插件内置的**（`dsh-skill-office` 等）只带 `resourceBase: { kind: 'directory', path }`，候选里根本没有文件路径。
+所以「有 path 才能打开」这个判断对内置技能必然失败。
+
+修法：新增 `GET /api/dsh-notes/skill-content?token=<opaque>`。列表时对每个无文件技能发一个
+`randomBytes(12)` 的不透明 token（整表替换、30 分钟过期），客户端拿 token 换正文，
+宿主再用注册表的 `get(name, {cwd})` 取内容。客户端**不接受按技能名直接取**，也把内置技能
+渲染成**只读视图**（没有编辑框与保存按钮，不进 tab 列表）。
+
+| 套件 | 结果 | 覆盖 |
+|---|---|---|
+| `builtintest` | 21 / 21 | 真实 `dsh-skill-office` 下 3 个内置技能都被识别；3 条正文分别 6058 / 6800 / 9171 字符；拿技能名当 token → 410、无 token → 400、伪造 token → 410、非 loopback → 403；**重新列一次列表后旧 token 立即作废** |
+| `skillwire` | 21 / 21 | 更新为断言新路由、只读视图类名与「内置」标签 |
+
+**全量回归：18 个套件 / 259 条断言，全绿。**
+
+**第三轮修复（用户实测：只看到系统内置的 7 个，自己的看不到）**
+
+诊断字段把根因一次定住（详见 DEVELOPMENT.md 同名条目）：
+
+1. `登记 dsh-office` 说明宿主平面拿到的注册表里**没有** `filesystem` 提供方。
+2. DSH 的 `dsh-web-app` 补丁里 `skill-filesystem` 写着 `disabled: true`，注释明说
+   "presets own local discovery" —— 本地技能发现被挪到了**每个 agent preset 的层**。
+3. 要读那一层需要 `presets.serviceFor(live, 'skills')`，其中 `live` 是**活的 agent 对象**，
+   宿主插件拿不到（`agents` 服务不在宿主平面）。
+
+第三方技能中心插件 `@linxin666/dsh-client-ui-skill-explorer` 的源码注释写的是同一件事：
+
+> "The web profile mounts the skill-filesystem provider only at the agent preset scope layer,
+> so the host plane cannot read project/user skills from `ctx.skills` — the list route scans
+> the official root conventions itself and merges registry entries"
+
+**因此改为与它一致的思路**：宿主自己按 DSH 官方约定扫盘，再与注册表结果按名字合并。
+
+| 项 | 内容 |
+|---|---|
+| 扫描根 | `<项目根>/.dsh/skills`(100)、`<项目根>/.agents/skills`(200)、自定义(300)、`~/.dsh/skills`(400，跳过 `.system`)、`~/.agents/skills`(500) |
+| 形态 | `<name>/SKILL.md` 目录包 与 `<name>.md` 平铺文件；**不递归**；跳过 `.` 开头 |
+| frontmatter | 自解析 `name`/`description`/`whenToUse`/`disable-model-invocation`，支持 `\|` 多行块与引号 |
+| 合并 | 扫描优先（带真实 path，可直接打开）；注册表独有的一律保留（内置技能，正文走 token） |
+
+**同时新增插件设置项**（用户要求「这是 plus 功能，默认开，不想要可以关」）：
+
+- `apply.Config` 挂上 schemastery schema —— DSH 的设置框架按
+  `entry.fiber.runtime.Config.toJSON()` 生成插件详情页表单，可选参数的 TS 类型声明**不产生**这个字段。
+- **每个字段都必须 `.volatile()`**：`dsh-settings` 的 `volatileForm()` 对没有任何 volatile
+  字段的 schema 直接 `return undefined`，该行不进配置目录，插件页那一行就没有「配置」入口。
+- `skillsReading`（默认 `true`）：关掉后客户端不显示任何技能入口，两条技能路由返回 404。
+- `skillRoots`：额外的技能目录。
+- **读配置必须拆 volatile 包装**：解析出来是 `{ get(), [volatile.write]() }`，
+  直接比较会恒真。统一走 `readConfig()`（`isVolatile()` → `get()`）。
+- **volatile 改动不重启插件**，所以上限与开关一律调用时现读。
+
+**配置页走 `plugins.bundle.config`**（照官方 `dsh-workbuddy-connect`）：
+
+| 项 | 内容 |
+|---|---|
+| 席位 | `plugins.bundle.config`，key = **包名**（包级入口，直接渲染在包详情页）；另挂 `plugins.row.config`（key `<包名>#<行id>`）兼容老宿主 |
+| 页面 | 自绘，不依赖 `configForms` / `SettingsFormModel` / `SettingsValueField` |
+| 读 | `GET api/dsh-notes/config` → `{ values, writable }` |
+| 写 | `POST api/dsh-notes/config` → `ctx.configEditor.edit(entry, change)` 落进 profile 的 `cordis.patch.yml` |
+| 降级 | 没有 `configEditor` 时 `writable: false`，POST 返回 501，界面显示只读提示 |
+
+**大小上限按 MB 显示**：界面填 `8`（右侧标 `MB`），存储仍按字节。
+换算限定在显示/解析层（`bytesToMb` / `mbToBytes`），宿主 schema 与路由判断不动。
+**不编辑不回写**：只有用户真的改了输入框才上报；非整 MB 的旧值显示时会舍入，
+自动回写会把 `1000000` 悄悄改成 `996147`。
+
+**验证**：`unittest` 44 条（默认显示 8、1~1024 MB 往返一致、小数换算、
+非整 MB 旧值只显示不回写、SizeField 只有一处 onChange、清空恢复、存储仍是字节）、
+`configwire` 23 条（两个席位都注册、key 拼法、客户端零 `configForms` 依赖、
+路由存在、类型校验、写回通道、真正的 switch 控件）、
+`configroute` 21 条（真跑路由：GET 读值含 volatile 拆包、无 editor 时 501、
+POST 写进 profile 且保留既有字段、7 类坏输入全部 400 且一次都没写）、
+`volatiletest` 11 条（volatileForm 接受、访问器陷阱、关掉后真 404）、
+`configentry` 11 条（`configure.has(row)` 命中、旧写法反例）。
+另更新 `grouptest`/`skillwire`/`sw2`/`menutest` 中因这次改动而失效的旧断言。
+
+**验证**：新增 `scantest` 20 条（目录包 / 平铺 / 多行描述 / 无 frontmatter / 隐藏目录 /
+`disable-model-invocation` / 真实用户技能 / 开关 404 / health 上报 / schema 含字段且默认 true），
+另有测试证明 `~/.dsh/skills` 下真实技能被扫到且 path 正确。
+
+**全量回归：20 个套件 / 287 条断言，全绿。**
+（`skilltest`/`icontest`/`diagtest` 的 3 条旧断言因「有了扫描后降级语义变了」而更新：
+没注册表时不再返回空列表，而是仍给出扫描结果。）
+
+**已知边界**
+- 技能页不进 tab 列表、不支持置顶：它不是文件，混进「最近打开的文件」会让状态恢复难解释。
+- 内置技能只是**只读展示**：它的正文里可能追加了运行期说明（如 Office 技能的运行时路径），
+  与实际加载给模型的内容一致，但不提供编辑。
+- 点开技能后 tab 名用真实的 `SKILL.md`，**不用** `/技能名`：`FileTypeIcon` 与文档头都按名字
+  推图标与路径，改了名字两者都会错（无扩展名会被当成 unknown 类型）。
+- 打开技能会**切换当前笔记文件夹**到技能自己的目录（围栏所限）。这是刻意的取舍，
+  已写进代码注释与开发文档；若日后觉得打扰，可改为记住「上次的笔记根」并在离开技能时还原。

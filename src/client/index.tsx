@@ -14,9 +14,22 @@ import { NotesPanel } from './NotesPanel';
 import { NotesStore } from './store';
 import { injectStyles } from './styles';
 import { NotesUpdateAction, type UpdateActionProps } from './UpdateAction';
+import {
+  NS as CONFIG_NS,
+  NotesConfigCard,
+  type NotesConfigProps as ConfigCardProps,
+  en as configEn,
+  zh as configZh,
+} from './ConfigCard';
 
 /** 面板 id：同时作为 sidebar.panellist 的 id 与 main 的 key，两者必须一致。 */
 const PANEL_ID = 'notes';
+
+/** 本插件在 profile 里的包名（配置页的 key 用它拼）。 */
+const PACKAGE_NAME = 'dsh-client-ui-notes';
+
+/** 本插件在 cordis.patch.yml 里的行 id（配置页的 key 用它拼）。 */
+const ROW_ID = 'ui-notes';
 
 /** 笔记按钮在左侧栏的排序（排在靠前位置）。 */
 const PANEL_ORDER = 30;
@@ -137,6 +150,20 @@ interface RemoteFacade {
  * `cannot get property "remote.directoryPicker" without inject`）。改为
  * `ctx.get('remote.directoryPicker')` 可选获取，缺失时安静降级。
  */
+/**
+ * Electron preload 注入的桌面目录桥（`globalThis.__DSH_DIRECTORY_PICKER__`）。
+ *
+ * 不是 cordis 服务，是桌面壳的 preload 脚本写进页面的普通对象；底层走
+ * `dsh-desktop:directory-pick` 的 IPC。DSH 官方的系统目录选择器就用它
+ * （见 `dsh-client-ui-directory-picker-native` 的 `client.js`）。
+ *
+ * 只声明本插件用到的 `pick`：桥的具体实现属于桌面壳，接口越窄越不容易随
+ * 版本变化而失效。
+ */
+interface DesktopDirectoryPicker {
+  pick(): Promise<string | null>;
+}
+
 interface PickDirectoryFacade {
   /** 弹系统目录选择框；用户取消时返回 null（个别版本回 { ok, value } 信封）。 */
   pick?(): Promise<string | null | { ok: boolean; value?: string }>;
@@ -169,6 +196,8 @@ interface ClientContext {
   /** 语言注册。 */
   locale: {
     register(namespace: string, dicts: { zh: Record<string, string>; en: Record<string, string> }): () => void;
+    /** 取某个命名空间里的键（配置面板用来读自己的字典）。 */
+    bind?(namespace: string): (key: string) => string;
   } | null;
   /** 副作用注册：回调立即执行，返回值在卸载时调用。 */
   effect(callback: () => () => void, label?: string): void;
@@ -189,7 +218,14 @@ export function apply(ctx: ClientContext): void {
   // 1) 文案
   ctx.effect(() => {
     try {
-      return ctx.locale?.register(NS, { zh, en }) ?? (() => {});
+      // 配置面板的字典用独立的命名空间（`notes.config`），与主面板的 `notes` 分开：
+    // 两者的键都叫 description 之类，合在一起会互相覆盖。
+    const main = ctx.locale?.register(NS, { zh, en }) ?? (() => {});
+    const config = ctx.locale?.register(CONFIG_NS, { zh: configZh, en: configEn }) ?? (() => {});
+    return () => {
+      main();
+      config();
+    };
     } catch {
       // 语言服务不可用不影响功能。
       return () => {};
@@ -327,6 +363,25 @@ export function apply(ctx: ClientContext): void {
   };
 
   /**
+   * 读 Electron preload 注入的桌面目录桥。
+   *
+   * 必须用 `ctx.get` 之外的方式：它不是 cordis 服务，而是一个挂在 `globalThis`
+   * 上的普通对象，由桌面壳的 preload 脚本写入。Web 部署下不存在。
+   *
+   * @returns 桥；不存在或形状不对时为 null。
+   */
+  const readDesktopPicker = (): DesktopDirectoryPicker | null => {
+    try {
+      const candidate = (globalThis as Record<string, unknown>)['__DSH_DIRECTORY_PICKER__'];
+      if (typeof candidate !== 'object' || candidate === null) return null;
+      const pick = (candidate as { pick?: unknown }).pick;
+      return typeof pick === 'function' ? (candidate as DesktopDirectoryPicker) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
    * 调起 DSH 的目录选择器。
    *
    * 首选官方 `uiWorkspace.pickDirectory()`；再退到 Remote 命名空间的 `pick()`。
@@ -336,6 +391,31 @@ export function apply(ctx: ClientContext): void {
    * 判成 gateway/bad-request，所以两处都走官方入口。
    */
   const pickDirectory = async (): Promise<string | null> => {
+    /*
+     * **优先走 Electron preload 注入的桌面桥**，这与 DSH 自己的实现完全一致。
+     *
+     * 为什么不能只用 `uiWorkspace.pickDirectory()`：那是 Remote RPC，调用要在
+     * 主进程与渲染进程之间往返一趟；而 DSH 的 macOS 选择器是一段 AppleScript，
+     * 里面 `activateIgnoringOtherApps(true)` 之后**立刻** `runModal` 阻塞。
+     * 经过 RPC 往返后，面板跑起来时宿主窗口已经不是「刚被点击的前台窗口」，
+     * 系统就按非活动窗口渲染它 —— 侧栏文字发灰、Open 按钮发灰。
+     *
+     * DSH 官方入口之所以正常，就是因为它用了这个桥：
+     *   `dsh-client-ui-directory-picker-native/client.js` 里
+     *   `const desktop = globalThis.__DSH_DIRECTORY_PICKER__`
+     *   `const pick = desktop === void 0 ? () => ctx.uiWorkspace.pickDirectory() : () => desktop.pick()`
+     * 桥不存在时（Web 部署、未来版本移除）才退回 RPC，行为与以前一致。
+     */
+    const desktop = readDesktopPicker();
+    if (desktop !== null) {
+      try {
+        const picked = await desktop.pick();
+        return typeof picked === 'string' ? picked : null;
+      } catch (error) {
+        console.warn('[notes] 桌面目录桥失败，改用 Remote 兜底', error);
+      }
+    }
+
     const workspaceNow = workspace ?? readService<WorkspaceFacade>('uiWorkspace');
     if (typeof workspaceNow?.pickDirectory === 'function') {
       try {
@@ -459,6 +539,54 @@ export function apply(ctx: ClientContext): void {
     }
   };
 
+  // 3.5) 卸载前清理：让「卸载」真正不留痕迹
+  //
+  // DSH 的 removeBundle 会 `pnpm remove` + 重新加载组合，**不会**碰浏览器存储。
+  // 本插件的 tab、置顶、文件夹历史都在 localStorage（键 `dsh.notes.v1`），
+  // 不主动清的话，卸载后它们会一直躺在那里 —— 将来重装会「复活」一批
+  // 指向可能已不存在的旧文件。
+  //
+  // 做法：监听插件管理器的快照，一旦本插件从「已安装」列表里消失就清一次。
+  // 只在**确定发生过卸载**时触发；正常启动/禁用/启用都不会误伤。
+  ctx.effect(() => {
+    const manager = pluginManager as
+      | { subscribe?: (fn: () => void) => () => void; getSnapshot?: () => unknown }
+      | null;
+    if (typeof manager?.getSnapshot !== 'function' || typeof manager.subscribe !== 'function') {
+      return () => {};
+    }
+    let armed = false;
+    let disposed = false;
+    const check = (): void => {
+      if (disposed) return;
+      try {
+        const snapshot = manager.getSnapshot?.() as
+          | { bundles?: readonly unknown[]; installed?: readonly unknown[] }
+          | undefined;
+        const list = snapshot?.bundles ?? snapshot?.installed;
+        if (!Array.isArray(list)) return;
+        const present = list.some((item) => {
+          const record = item as { name?: unknown; packageName?: unknown };
+          return record.name === PACKAGE_NAME || record.packageName === PACKAGE_NAME;
+        });
+        // 先见到过一次「在」，之后见到「不在」才算卸载 —— 避免列表还没加载时误清。
+        if (present) armed = true;
+        else if (armed) {
+          armed = false;
+          store.clearPersistedState();
+        }
+      } catch {
+        // 读不到快照就算了：清理是加分项，不能因此出错。
+      }
+    };
+    const off = manager.subscribe(check);
+    check();
+    return () => {
+      disposed = true;
+      off();
+    };
+  }, 'notes: cleanup on uninstall');
+
   // 4) 左侧栏按钮
   ctx.effect(
     () =>
@@ -492,6 +620,16 @@ export function apply(ctx: ClientContext): void {
               openExternal,
               canOpenExternal,
               listApplications,
+              // 技能阅读是否启用：只有宿主明确说「关」才关，读不到按开处理
+              // （旧宿主没有这个字段，那时技能功能本来就存在）。
+              skillsEnabled: async () => {
+                try {
+                  const info = await api.health();
+                  return info.skillsReading !== false;
+                } catch {
+                  return true;
+                }
+              },
             }),
           },
           NotesPanel,
@@ -499,6 +637,73 @@ export function apply(ctx: ClientContext): void {
       ),
     'notes: main panel',
   );
+
+  /**
+   * 5.5) 插件页里的**配置面板**。
+   *
+   * 挂的是 `plugins.bundle.config`，**key 就是包名**（不是 `<包名>#<行id>`）。
+   * 这是 DSH 0.1.6+ 的包级配置入口：插件管理页在包详情里直接渲染它，
+   * 判定条件是 `configured = ledger.bundles.has(pkg.name)`，不需要点进某一行。
+   *
+   * 参照官方 `dsh-workbuddy-connect`（`lib/client.js` 的
+   * `plugins.bundle.config page` 那段）——它也是这么挂的，而且**不使用**
+   * `configForms` / `SettingsFormModel`：页面自己画，值走插件自己的 HTTP 路由。
+   * 这正是本插件要的形状：配置页只依赖我们自己的 `api/dsh-notes/config`，
+   * DSH 内部表单机制怎么改都影响不到它。
+   *
+   * 同时也挂一份 `plugins.row.config`：老一点的宿主只认行级入口，
+   * 两个都注册，哪边存在就在哪边显示，互不影响。
+   */
+  ctx.effect(() => {
+    const bundleKey = PACKAGE_NAME;
+    const rowKey = `${PACKAGE_NAME}#${ROW_ID}`;
+
+    /** 语言读取器：拿不到就退回 key 本身，界面上至少有字。 */
+    const translator = (key: string): string => {
+      try {
+        return ctx.locale?.bind?.(CONFIG_NS)?.(key) ?? key;
+      } catch {
+        return key;
+      }
+    };
+
+    /** 包级入口（0.1.6+）。 */
+    const bundle = (): (() => void) =>
+      ctx.slots.inject('plugins.bundle.config', () =>
+        ctx.slots.register(
+          {
+            name: 'plugins.bundle.config',
+            key: bundleKey,
+            order: 10,
+            label: '笔记设置',
+            locale: CONFIG_NS,
+            inject: (): Partial<ConfigCardProps> => ({ t: translator }),
+          },
+          NotesConfigCard,
+        ),
+      );
+
+    /** 行级入口（老宿主）。 */
+    const row = (): (() => void) =>
+      ctx.slots.inject('plugins.row.config', () =>
+        ctx.slots.register(
+          {
+            name: 'plugins.row.config',
+            key: rowKey,
+            order: 10,
+            label: '笔记设置',
+            locale: CONFIG_NS,
+            inject: (): Partial<ConfigCardProps> => ({ t: translator }),
+          },
+          NotesConfigCard,
+        ),
+      );
+
+    const disposers = [bundle(), row()];
+    return () => {
+      for (const dispose of disposers) dispose();
+    };
+  }, 'notes: config page');
 
   /**
    * 6) 插件页上的「检查更新 / 更新」控件。

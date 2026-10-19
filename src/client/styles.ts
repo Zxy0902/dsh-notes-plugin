@@ -776,6 +776,328 @@ const CSS = `
    可能是段落、标题或列表，不固定；:first-child 保证只作用于第一个。 */
 .dsh-notes__preview > *:first-child { margin-top: 22px; }
 
+/* 标签拖动排序：拖动期间的视觉反馈，DOM 顺序不变、只改 order。 */
+.dsh-notes__tab--dragging { cursor: grabbing; }
+/* 被拖的那个标签半透明 + 轻微抬起，表示「正被拿着」。 */
+.dsh-notes__tab--ghost {
+  opacity: .55;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .18);
+}
+/* 拖动期间整体禁掉文字选中，避免拖着拖着把标签名选蓝。 */
+.dsh-notes__tabs--reordering { user-select: none; }
+
+/* 文档头最左侧的「← 技能列表」：从技能打开的文件用它与普通笔记区分。 */
+.dsh-notes__back {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.dsh-notes__back:hover {
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* 技能列表的分组标题：系统内置 / 我的技能。 */
+.dsh-notes__skillgroup + .dsh-notes__skillgroup { margin-top: 14px; }
+.dsh-notes__skillgroup-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-notes__skillgroup-count {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  font-weight: 500;
+}
+
+/* ---------------- 文件夹下拉 ---------------- */
+/* 触发器外面包一层相对定位容器：下拉浮层要相对它定位，且不能占布局高度。 */
+.dsh-notes__folderwrap { position: relative; z-index: 6; }
+.dsh-notes__foldermenu {
+  position: absolute;
+  z-index: 30;
+  left: 8px;
+  right: 8px;
+  top: calc(100% - 2px);
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 9px;
+  /* 必须不透明：浮层压在置顶区/文件树上，透明会两层文字重叠。
+     bg-overlay 在浅色下是偏白的实色，深色下是深灰实色；再兜一层 layer-1。 */
+  background: var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1, #ffffff));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .16);
+}
+.dsh-notes__foldermenu-label {
+  padding: 4px 7px 2px;
+  font-size: 10.5px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-notes__foldermenu-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  border-radius: 6px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+}
+.dsh-notes__foldermenu-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
+/* 当前项不可点，只做标识。 */
+.dsh-notes__foldermenu-row--current { padding: 0 7px; color: var(--dsw-alias-label-secondary); }
+.dsh-notes__foldermenu-pick {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.dsh-notes__foldermenu-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 删除按钮单独一块点击区：点它只删历史，不会顺带切换目录。 */
+.dsh-notes__foldermenu-x {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 3px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  opacity: 0;
+}
+.dsh-notes__foldermenu-row:hover .dsh-notes__foldermenu-x { opacity: 1; }
+.dsh-notes__foldermenu-x:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-notes__foldermenu-sep {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--dsw-alias-border-l1);
+}
+.dsh-notes__foldermenu-action {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.dsh-notes__foldermenu-action:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+/* ---------------- 技能目录页 ---------------- */
+/* 技能页顶替整个阅读区（含 tab 栏）。它是一块独立视图，不是又一个文件 tab。 */
+.dsh-notes__skillpane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.dsh-notes__skillhead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+.dsh-notes__skilltitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-notes__skillcount {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+}
+.dsh-notes__skillsearch { flex: 1; min-width: 0; display: flex; justify-content: flex-end; }
+.dsh-notes__skillinput {
+  width: 200px;
+  max-width: 100%;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.dsh-notes__skillinput:focus { border-color: var(--dsw-alias-brand-primary); }
+.dsh-notes__skillbody {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px 14px 24px;
+}
+.dsh-notes__skilllist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dsh-notes__skillitem {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dsh-notes__skillitem:hover {
+  border-color: var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dsh-notes__skillicon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-notes__skillicon img { border-radius: 4px; object-fit: contain; }
+.dsh-notes__skilltext { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dsh-notes__skillname {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-notes__skillname code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.dsh-notes__skilltag {
+  padding: 0 5px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 999px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10.5px;
+  line-height: 15px;
+}
+/* 描述可能很长：最多两行，超出省略。点进详情页能看到全文。 */
+.dsh-notes__skilldesc {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--dsw-alias-label-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.dsh-notes__skillfoot {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-notes__skillempty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 56px 24px;
+  text-align: center;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-notes__skillempty h3 { font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsh-notes__skillempty p { max-width: 380px; font-size: 12px; line-height: 1.65; }
+.dsh-notes__skillerror {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+/* 内置技能正文：标题栏里显示 /name，右侧标注只读。 */
+.dsh-notes__inlineskill-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 500;
+}
+.dsh-notes__inlineskill-note {
+  justify-content: flex-end;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+/* 未选文件夹时的技能页：顶部一条返回栏。 */
+.dsh-notes__skillbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+/* 引导页的两个按钮并排（选择文件夹 / 看技能）。 */
+.dsh-notes__emptyactions { display: flex; align-items: center; gap: 8px; }
+/* 技能按钮与树操作按钮之间有明显分界：它通向另一个页面，不是树的开关。 */
+.dsh-notes__treebtn--skill { margin-left: auto; }
+.dsh-notes__treebtn--skill:hover:not(:disabled) { color: var(--dsw-alias-brand-primary); }
+
 /* ---------------- 空状态 ---------------- */
 .dsh-notes__empty {
   flex: 1;
@@ -1128,6 +1450,260 @@ const CSS = `
 }
 .dsh-notes-update__btn--danger:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover-danger, rgba(236, 19, 19, 0.05));
+}
+
+/* ---- 插件页里的配置面板 ---- */
+.dsh-notes__config {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 560px;
+}
+.dsh-notes__configintro {
+  margin: 0 0 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 20px;
+}
+.dsh-notes__confignote {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+.dsh-notes__configfield {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+.dsh-notes__configfield-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.dsh-notes__configfield-labels {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.dsh-notes__configfield-label {
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 20px;
+}
+.dsh-notes__configfield-hint {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+.dsh-notes__configinput,
+.dsh-notes__configtextarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  outline: none;
+}
+.dsh-notes__configtextarea {
+  resize: vertical;
+  /* DSH 没有 font 类 token，等宽字体直接给通用栈。 */
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+/* 带单位的输入框：后缀贴在框内右侧，看起来是同一个控件 */
+.dsh-notes__configunit {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.dsh-notes__configinput--unit {
+  padding-right: 40px;
+}
+.dsh-notes__configunit-suffix {
+  position: absolute;
+  right: 10px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.dsh-notes__configinput:focus,
+.dsh-notes__configtextarea:focus {
+  border-color: var(--dsw-alias-brand-primary);
+}
+.dsh-notes__configinput[aria-invalid='true'] {
+  border-color: var(--dsw-alias-state-error-primary, #e5484d);
+}
+.dsh-notes__configinput:disabled,
+.dsh-notes__configtextarea:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 开关：手绘，不依赖 primitives 的 Switch（那边是私有实现，版本可能变） */
+.dsh-notes__configswitch {
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  background: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.16));
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+.dsh-notes__configswitch--on {
+  background: var(--dsw-alias-brand-primary);
+}
+.dsh-notes__configswitch:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.dsh-notes__configswitch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 140ms ease;
+}
+.dsh-notes__configswitch--on .dsh-notes__configswitch-thumb {
+  transform: translateX(16px);
+}
+
+.dsh-notes__configerror {
+  margin: 0;
+  color: var(--dsw-alias-state-error-primary, #e5484d);
+  font-size: 12px;
+  line-height: 18px;
+}
+.dsh-notes__configfield--lead {
+  border-bottom: none;
+}
+
+/* 高级折叠区：整条是一颗可点的胶囊，视觉上明确「这里能展开」 */
+.dsh-notes__advanced {
+  margin-top: 12px;
+}
+.dsh-notes__advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+.dsh-notes__advanced-toggle:hover {
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-notes__advanced-toggle:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+.dsh-notes__advanced-toggle--open {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-notes__advanced-caret {
+  flex: none;
+  width: 10px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10px;
+}
+.dsh-notes__advanced-title {
+  flex: none;
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+}
+.dsh-notes__advanced-dot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--dsw-alias-brand-primary);
+}
+.dsh-notes__advanced-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 右侧「展开 / 收起」：告诉用户点哪里会发生什么 */
+.dsh-notes__advanced-action {
+  flex: none;
+  padding-left: 4px;
+  color: var(--dsw-alias-brand-primary);
+  font-size: 12px;
+}
+.dsh-notes__advanced-body {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 12px 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-top: none;
+  border-bottom-left-radius: 8px;
+  border-bottom-right-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+.dsh-notes__advanced-body .dsh-notes__configfield:last-child {
+  border-bottom: none;
+}
+
+.dsh-notes__configactions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 12px;
+}
+.dsh-notes__configbtn {
+  padding: 5px 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+.dsh-notes__configbtn--primary {
+  border-color: var(--dsw-alias-brand-primary);
+  background: var(--dsw-alias-brand-primary);
+  color: #fff;
+}
+.dsh-notes__configbtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.dsh-notes__configsaved {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
 }
 `;
 

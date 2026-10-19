@@ -25,6 +25,9 @@ const MODULES = [
   'lib/client/useScrollSync.js',
   'lib/client/useElementWidth.js',
   'lib/client/NotesPanel.js',
+  // 插件页里的配置面板：不登记的话打包产物里没有它，
+  // 运行时 `__mod_ConfigCard is not defined`（与 UpdateAction 同一个坑）。
+  'lib/client/ConfigCard.js',
   // 插件页上的更新控件：必须登记，否则打包产物里缺少该模块的表项，
   // 运行时会报 `__mod_UpdateAction is not defined`（新增客户端模块时都要加这里）。
   'lib/client/UpdateAction.js',

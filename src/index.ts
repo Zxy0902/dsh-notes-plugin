@@ -16,6 +16,8 @@ import { basename, dirname, extname, isAbsolute, join, normalize, resolve, sep }
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import z from '@deepseek-ai/schemastery';
+import { isVolatile } from '@deepseek-ai/cosmokit';
 
 /** cordis 插件名（稳定标识）。 */
 export const name = 'notes';
@@ -23,15 +25,67 @@ export const name = 'notes';
 /** 路由挂载前需要就绪的服务。 */
 export const inject = ['webServer'];
 
-/** 插件配置。 */
+/**
+ * 插件配置。
+ *
+ * **刻意没有 `enabled`**：DSH 插件页自带「启用 / 禁用」开关，它会直接停掉整个插件。
+ * 再提供一个是同一件事的两个入口，用户会困惑「我关哪个才是真的关」。
+ * 所以这里只放插件自己的行为选项。
+ */
 export interface Config {
-  /** 关掉后插件完全不注册路由。 */
-  enabled?: boolean;
   /** 单文件读取上限（字节），默认 8 MiB。 */
   maxReadBytes?: number;
   /** 单文件写入上限（字节），默认 8 MiB。 */
   maxWriteBytes?: number;
+  /** 是否启用「技能」阅读（默认开）。关掉后入口完全不出现。 */
+  skillsReading?: boolean;
+  /**
+   * 额外的技能根目录（在默认根之外追加）。
+   *
+   * 默认根已覆盖 DSH 的官方约定（项目 `.dsh/skills`、`~/.dsh/skills` 等）；
+   * 这里只用于「技能放在别处」的情况。
+   */
+  skillRoots?: string[];
 }
+
+/**
+ * 插件配置的 schema。
+ *
+ * **必须导出**：DSH 的设置框架按 `entry.fiber.runtime.Config.toJSON()` 生成表单
+ * （见 `dsh-settings` 的 `schema(entry)`），没有它插件页就只有一个「启用」开关，
+ * 本插件的这些选项不会出现在界面上。
+ */
+export const ConfigSchema = z.object({
+  // **必须 `.volatile()`**，这是 DSH 插件页出现「配置」入口的唯一条件：
+  // `dsh-settings` 的 `describe()` 用 `volatileForm(schema)` 过滤，一个 volatile
+  // 字段都没有时直接 `return undefined`，该行就不进配置表单目录，插件管理页的
+  // `configure.has(row)` 因此为假 —— 行标题是纯文本，没有可点的「配置」按钮。
+  //
+  // 副作用是「改这一项不会重启插件」：`loader/entry.js` 的
+  // `equalExceptVolatile()` 把 volatile 字段当作相等，只走 `_commitVolatile()`
+  // 把新值写进运行中的 fiber。所以这些值必须**每次使用时现读**，不能在 apply
+  // 里折算成常量（见下面的 `readConfig()`）。
+  skillsReading: z
+    .boolean()
+    .default(true)
+    .volatile()
+    .description('在文件夹下拉里提供「浏览技能」，可阅读技能说明与正文'),
+  skillRoots: z
+    .array(z.string())
+    .default([])
+    .volatile()
+    .description('额外的技能目录（每行一个绝对路径）；留空只用 DSH 约定的默认位置'),
+  maxReadBytes: z
+    .number()
+    .default(8 * 1024 * 1024)
+    .volatile()
+    .description('单个文件读取上限（字节）'),
+  maxWriteBytes: z
+    .number()
+    .default(8 * 1024 * 1024)
+    .volatile()
+    .description('单个文件写入上限（字节）'),
+});
 
 // ---------------------------------------------------------------------------
 // 信任围栏
@@ -253,6 +307,696 @@ async function latestPublishedVersion(logger: Logger, fresh: boolean): Promise<L
  * `CAN_DELETE` 为 false，删除入口根本不出现。
  */
 const TRASH_DIR_NAME = 'dsh-notes-trash';
+
+// ---------------------------------------------------------------------------
+// 技能（skill）目录
+// ---------------------------------------------------------------------------
+
+/**
+ * 从 DSH 官方 skill 注册表里读出来的一条技能摘要。
+ *
+ * 字段与官方 `SkillRegistry.list()` 的结果对齐：那份结果已经做过「按 rank 裁决
+ * 重名、按 invocation 过滤」的整理，界面拿到的就是真正可用的那批。
+ */
+export interface SkillSummary {
+  /** kebab-case 名称（`/name` 里用的就是它）。 */
+  name: string;
+  /** 一句话路由描述（列表里的第二行）。 */
+  description: string;
+  /** 可选的额外使用指引。 */
+  whenToUse?: string;
+  /** SKILL.md 的绝对路径；插件内置的技能可能没有文件。 */
+  path?: string;
+  /**
+   * 技能目录（`resourceBase` 为目录时才有），插件内置技能靠它找图标。
+   *
+   * 这类技能只给 `resourceBase: {kind:'directory', path}`，不给 `path` ——
+   * 所以「有没有图标」不能只看 `path`。
+   */
+  resourceDir?: string;
+  /** 是否同时暴露给模型。 */
+  modelInvocable: boolean;
+  /**
+   * 来源分组：`bundled` 是随 DSH 或其插件自带的（Office 三件套等），
+   * 其余是用户自己的（项目 / 用户目录 / 自定义目录）。
+   *
+   * 界面据此分成「系统内置」与「我的」两块。
+   */
+  source?: 'bundled' | 'project' | 'user' | 'custom';
+}
+
+/**
+ * 官方 skill 注册表的**最小面**。
+ *
+ * 只声明本插件真正调用的方法，且全部可选：`ctx.skills` 由官方
+ * `@deepseek-ai/dsh-skill` 提供，精简 profile 或未来版本可能没挂它 ——
+ * 那种情况下「技能」入口只是看不到内容，绝不让插件加载失败。
+ *
+ * 刻意**不自己扫盘解析 SKILL.md**：注册表已经处理了全部脏活（项目根 /
+ * `~/.dsh/skills` / `~/.agents/skills` 的优先级、YAML frontmatter、
+ * 重名裁决、`.system` 跳过、热监听）。自己再实现一遍只会与官方结果不一致。
+ */
+interface SkillRegistryFacade {
+  /** 列出某个工作目录可见的技能摘要（官方 `SkillRegistry.list`）。 */
+  list?(options: { cwd?: string; scope?: string }): Promise<readonly unknown[]>;
+  /** 带发现完整性标记的版本（官方 `SkillRegistry.snapshot`）。 */
+  snapshot?(options: { cwd?: string; scope?: string }): Promise<{
+    skills?: readonly unknown[];
+    complete?: boolean;
+  }>;
+  /** 按名字加载完整技能（含正文），官方 `SkillRegistry.get`。 */
+  get?(name: string, options: { cwd?: string; scope?: string }): Promise<
+    { content?: unknown; name?: unknown } | undefined | null
+  >;
+  /**
+   * 注册表的内部层级（诊断用，非公开 API）。
+   *
+   * 真实环境出现过「只列出内置技能」而本地复现不出来的情况。要知道注册表里
+   * **实际登记了哪些提供方**，只能读 `layers` —— 官方没有暴露这个信息。
+   * 读不到就返回空数组，绝不因为诊断把功能弄坏。
+   */
+  layers?: {
+    global?: { providers?: { keys?(): Iterable<string> } | Map<string, unknown> };
+    scoped?: { size?: number };
+  };
+}
+
+/**
+ * 配置写回通道的最小面（`ctx.configEditor`）。
+ *
+ * 只需要三个成员：找到本插件这一行、读它当前的原始配置、提交一次变更。
+ * 形状取自 `@deepseek-ai/dsh-config-editor` 的 `ConfigEditor`：
+ * `entries()` / `edit(entry, change)`；`configuration()` 用来判断这一行是否存在。
+ */
+interface ConfigEditorFacade {
+  entries?: () => readonly unknown[];
+  edit?: (entry: unknown, change: (current: unknown, inherited: unknown) => unknown) => Promise<void>;
+  /**
+   * 读 profile 里各条目的「继承层 / 覆盖层」原始值。
+   *
+   * 用它而不是 `fiber.config`：后者是**运行中**的值，volatile 字段要等
+   * loader 的 `_commitVolatile()` 才跟上，存在几毫秒的窗口。而这里直接读的是
+   * 已经落盘的补丁，写盘成功即成立 —— 读配置时以它为准更准。
+   */
+  configuration?: () => readonly {
+    entry?: { options?: { id?: string } };
+    override?: Record<string, unknown>;
+  }[];
+}
+
+/** 会话登记表的最小面：取当前会话的工作目录，供注册表按项目根发现技能。 */
+interface SessionRegistryFacade {
+  list?(): readonly { header?: { cwd?: unknown } }[];
+}
+
+/**
+ * 归一化一条技能摘要。
+ *
+ * 注册表给的是富对象：`{ name, path?, description, whenToUse?, invocation:
+ * { modelInvocable, userInvocable }, source, provider, resourceBase? }`。
+ * 这里只挑界面要用的字段并做类型收窄，免得把未定义的结构直接透给客户端。
+ *
+ * 注意 `modelInvocable` 在 `invocation` **里面**，不是顶层（官方 `skills/list`
+ * 会把它拍平，但注册表的 `snapshot().skills` 不会）。两种形状都认。
+ *
+ * @param raw - 注册表返回的原始条目。
+ * @returns 归一化后的摘要；name 不合法时返回 null。
+ */
+function normalizeSkill(raw: unknown): SkillSummary | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const item = raw as Record<string, unknown>;
+  const name = item.name;
+  if (typeof name !== 'string' || name === '') return null;
+
+  // 顶层优先（官方 skills/list 的拍平形状），否则取嵌套的 invocation。
+  const invocation =
+    typeof item.invocation === 'object' && item.invocation !== null
+      ? (item.invocation as Record<string, unknown>)
+      : null;
+  const flat = item.modelInvocable;
+  const nested = invocation?.modelInvocable;
+  const modelInvocable = typeof flat === 'boolean' ? flat : typeof nested === 'boolean' ? nested : true;
+
+  const out: SkillSummary = {
+    name,
+    description: typeof item.description === 'string' ? item.description : '',
+    modelInvocable,
+  };
+  if (typeof item.whenToUse === 'string' && item.whenToUse !== '') out.whenToUse = item.whenToUse;
+  if (typeof item.path === 'string' && item.path !== '') out.path = item.path;
+
+  // 插件内置技能没有 `path`，但常有 `resourceBase: { kind: 'directory', path }`。
+  // 记下来，图标与「技能家目录」都以它为准。
+  const base = item.resourceBase;
+  if (typeof base === 'object' && base !== null) {
+    const record = base as Record<string, unknown>;
+    if (record.kind === 'directory' && typeof record.path === 'string' && record.path !== '') {
+      out.resourceDir = record.path;
+    }
+  }
+  return out;
+}
+
+/** 图标文件名 → MIME。只认这几种，其余一律当不是图标。 */
+const ICON_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+};
+
+/** 单个图标的读取上限：再大就不当图标了，防止把一堆大图塞进响应。 */
+const MAX_ICON_BYTES = 64 * 1024;
+
+/** 单个 SKILL.md 的读取上限：技能正文不会这么大，超过就当不是技能文件。 */
+const MAX_SKILL_BYTES = 512 * 1024;
+
+/**
+ * 盘点技能目录里自带的图标。
+ *
+ * 社区里常见的约定是把图标放在技能目录的 `assets/` 下（`assets/icon.png` 等），
+ * 也有直接放在目录根的。这里两种都看，输出「技能目录相对路径 → data URL」。
+ *
+ * 由宿主读而不是让浏览器去读：宿主本来就有磁盘权限，浏览器侧不必为一张图标
+ * 再开一条路由。任何一步失败都只是这一条没有图标，绝不影响技能列表本身。
+ *
+ * @param dirs - 技能目录（SKILL.md 所在目录）列表。
+ * @returns 相对路径到 data URL 的映射。
+ */
+async function readSkillIcons(dirs: readonly string[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+
+  for (const dir of dirs) {
+    for (const folder of ['assets', '']) {
+      let entries;
+      try {
+        entries = await readdir(join(dir, folder), { withFileTypes: true });
+      } catch {
+        continue; // 没有这个子目录就跳过。
+      }
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const mime = ICON_MIME[extname(entry.name).toLowerCase()];
+        if (mime === undefined) continue;
+        const full = join(dir, folder, entry.name);
+        try {
+          const info = await stat(full);
+          if (info.size > MAX_ICON_BYTES) continue;
+          const data = await readFile(full);
+          const rel = folder === '' ? entry.name : `${folder}/${entry.name}`;
+          out[`${dir}\u0000${rel}`] = `data:${mime};base64,${data.toString('base64')}`;
+        } catch {
+          // 单个图标读失败不影响其余。
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** 技能目录盘点的结果。 */
+export interface SkillListing {
+  /** 注册表是否存在（false 时入口给出可读提示，而不是空列表）。 */
+  available: boolean;
+  /** 询问注册表时用的工作目录。 */
+  cwd: string;
+  /** 发现是否完整（某些提供方出错时为 false，列表仍可用）。 */
+  complete: boolean;
+  /**
+   * 本次列出的技能来自哪些插件（诊断用）。
+   *
+   * 真实环境里出现过「只列出内置技能、用户技能不见了」的情况，而本地用同一个
+   * 注册表能全列出来。把「用的是哪个注册表的哪几个提供方」直接摆到界面上，
+   * 比让用户去猜是环境问题还是代码问题快得多。
+   */
+  providers: string[];
+  /** 本次询问注册表的工作目录（项目级技能靠它发现）。 */
+  askedCwd: string;
+  /**
+   * 注册表里**登记在册**的提供方名字（不只是这次供出技能的）。
+   *
+   * 与 `providers` 的区别：`providers` 是「这次真的给了技能」，这里是「装了哪些」。
+   * 两者对不上就说明某个提供方挂了却没产出，是排查的关键。
+   */
+  registeredProviders: string[];
+  skills: SkillSummary[];
+  /** 「技能目录 + NUL + 相对路径」→ 图标 data URL。 */
+  icons: Record<string, string>;
+  /**
+   * 内置技能正文的不透明 token → 技能名。
+   *
+   * 插件内置的技能（如 Office 三件套）**没有 `SKILL.md` 路径**，宿主侧读不到文件；
+   * 但注册表的 `get(name)` 能拿到完整正文。这里只发一个随机 token、不发名字，
+   * 避免让客户端能按名字任意取任意技能。
+   */
+  inline: Record<string, string>;
+}
+
+// ---------------------------------------------------------------------------
+// 技能目录扫描（宿主平面）
+// ---------------------------------------------------------------------------
+
+/**
+ * 一个技能根目录：路径 + 来源分组 + 优先级。
+ *
+ * `rank` 越小越优先，与 DSH 官方 `dsh-skill-filesystem` 的约定一致：
+ * 项目 > 自定义 > 用户 > 内置。
+ */
+interface SkillRoot {
+  path: string;
+  /** 来源分组，界面按它分类显示。 */
+  source: 'project' | 'custom' | 'user' | 'bundled';
+  rank: number;
+  /** 是否跳过 `.system` 子目录（DSH 的用户根里有系统技能，不算用户技能）。 */
+  skipSystem?: boolean;
+}
+
+/**
+ * 从路径往上找最近的、含 `.git` 的祖先目录；找不到就用起点本身。
+ *
+ * 这与 DSH 自己的「项目根」判定一致：`<项目根>/.dsh/skills` 才是项目技能。
+ *
+ * @param start - 起始目录（通常是会话工作目录）。
+ * @returns 项目根绝对路径。
+ */
+async function findProjectRoot(start: string): Promise<string> {
+  let current = resolve(start);
+  // 有深度上限，避免在异常路径上无限往上跑。
+  for (let depth = 0; depth < 64; depth += 1) {
+    try {
+      const info = await stat(join(current, '.git'));
+      if (info.isDirectory() || info.isFile()) return current;
+    } catch {
+      // 没有 .git，继续往上。
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return resolve(start);
+}
+
+/**
+ * 取当前会话的工作目录（决定项目级技能根在哪）。
+ *
+ * 先问会话登记表，拿不到再退回进程 cwd。技能列表与技能文件读取都用它，
+ * 保证两条路由看到的是同一批根目录。
+ *
+ * @param sessions - 会话登记表（可能不存在）。
+ * @returns 工作目录绝对路径。
+ */
+async function resolveSessionCwd(sessions: SessionRegistryFacade | null): Promise<string> {
+  try {
+    const all = sessions?.list?.();
+    if (Array.isArray(all)) {
+      const first = all.find(
+        (item) => typeof item?.header?.cwd === 'string' && item.header.cwd !== '',
+      );
+      if (first !== undefined && typeof first.header?.cwd === 'string') return first.header.cwd;
+    }
+  } catch {
+    // 会话表不可用就退回进程 cwd，只影响项目级技能能否被发现。
+  }
+  return process.cwd();
+}
+
+/**
+ * 列出本次应该扫描的技能根目录。
+ *
+ * 按 DSH 官方约定排列（rank 越小越优先）：
+ * - 100 `<项目根>/.dsh/skills`
+ * - 200 `<项目根>/.agents/skills`
+ * - 300 自定义目录（插件配置）
+ * - 400 `~/.dsh/skills`（跳过 `.system`）
+ * - 500 `~/.agents/skills`
+ *
+ * @param cwd - 会话工作目录（决定项目根）。
+ * @param customDirs - 额外的自定义目录。
+ * @returns 根目录列表。
+ */
+async function skillRootsFor(cwd: string, customDirs: readonly string[]): Promise<SkillRoot[]> {
+  const home = homedir();
+  const projectRoot = await findProjectRoot(cwd);
+  const roots: SkillRoot[] = [
+    { path: join(projectRoot, '.dsh', 'skills'), source: 'project', rank: 100 },
+    { path: join(projectRoot, '.agents', 'skills'), source: 'project', rank: 200 },
+  ];
+  for (const dir of customDirs) {
+    if (typeof dir !== 'string' || dir.trim() === '') continue;
+    roots.push({ path: resolve(dir), source: 'custom', rank: 300 });
+  }
+  // DSH 与 Agents 的用户根：HOME 下的可见目录，不递归，跳过 .system。
+  roots.push({ path: join(home, '.dsh', 'skills'), source: 'user', rank: 400, skipSystem: true });
+  roots.push({ path: join(home, '.agents', 'skills'), source: 'user', rank: 500 });
+  return roots;
+}
+
+/**
+ * 解析 SKILL.md 开头的 YAML frontmatter。
+ *
+ * 只认 DSH 实际用到的几个键（`name`、`description`、`whenToUse`、
+ * `disable-model-invocation`、`metadata`）；不是通用 YAML 解析器 ——
+ * 这里刻意保持小而可预测，遇到不认识的写法就忽略，不影响其余字段。
+ *
+ * @param text - 文件全文。
+ * @returns 解析结果；没有 frontmatter 时返回 null。
+ */
+function parseFrontmatter(text: string): {
+  name?: string;
+  description?: string;
+  whenToUse?: string;
+  modelInvocable: boolean;
+} | null {
+  // frontmatter 必须在文件最前面：`---` 起、`---` 止。
+  const match = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+  if (match === null) return null;
+  const body = match[1] ?? '';
+
+  const out: { name?: string; description?: string; whenToUse?: string; modelInvocable: boolean } = {
+    modelInvocable: true,
+  };
+
+  // 逐行处理「键: 值」，值可能是单行，也可能是 `|` / `>` 开头的多行块。
+  const lines = body.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    const kv = /^([A-Za-z][\w-]*):\s*(.*)$/.exec(line);
+    if (kv === null) continue;
+    const key = kv[1] ?? '';
+    let value = (kv[2] ?? '').trim();
+
+    // 多行标量：收集后续缩进行。
+    if (value === '|' || value === '>' || value === '|-' || value === '>-') {
+      const collected: string[] = [];
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1] ?? '';
+        if (next.trim() !== '' && !/^\s/.test(next)) break;
+        collected.push(next.trim());
+        i += 1;
+      }
+      value = collected.join(' ').trim();
+    }
+
+    // 去掉包裹的引号。
+    if (
+      (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+      (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    if (key === 'name') out.name = value;
+    else if (key === 'description') out.description = value;
+    else if (key === 'whenToUse') out.whenToUse = value;
+    else if (key === 'disable-model-invocation') {
+      out.modelInvocable = !/^(true|yes|on|1)$/i.test(value);
+    }
+  }
+  return out;
+}
+
+/** 扫描得到的一条技能（比注册表的摘要多一个来源字段）。 */
+interface ScannedSkill extends SkillSummary {
+  /** 来源分组。 */
+  source: 'project' | 'custom' | 'user' | 'bundled';
+  /** 优先级的数值形式（越小越优先），用于合并时裁决重名。 */
+  rank: number;
+}
+
+/**
+ * 扫描一个技能根目录。
+ *
+ * DSH 的约定是**不递归**：只认根目录顶层的 `<name>/SKILL.md` 目录包，或
+ * `<name>.md` 平铺文件。这里照做，避免扫出一堆目录里碰巧叫 SKILL.md 的东西。
+ *
+ * @param root - 根目录描述。
+ * @param limit - 最多读多少个（防止异常目录拖垮请求）。
+ * @returns 扫到的技能列表（不含顺序保证）。
+ */
+async function scanSkillRoot(root: SkillRoot, limit = 500): Promise<ScannedSkill[]> {
+  let entries;
+  try {
+    entries = await readdir(root.path, { withFileTypes: true });
+  } catch {
+    return []; // 目录不存在是最常见的情况，静默跳过。
+  }
+
+  const out: ScannedSkill[] = [];
+  for (const entry of entries) {
+    if (out.length >= limit) break;
+    if (root.skipSystem === true && entry.name === '.system') continue;
+    if (entry.name.startsWith('.')) continue;
+
+    // 形态一：目录包 `<name>/SKILL.md`
+    if (entry.isDirectory() || entry.isSymbolicLink()) {
+      const file = join(root.path, entry.name, 'SKILL.md');
+      let raw: string;
+      let info;
+      try {
+        info = await stat(file);
+        if (!info.isFile() || info.size > MAX_SKILL_BYTES) continue;
+        raw = await readFile(file, 'utf8');
+      } catch {
+        continue; // 目录里没有 SKILL.md，或读不到。
+      }
+      const meta = parseFrontmatter(raw);
+      if (meta?.name === undefined || meta.name === '' || meta.description === undefined) continue;
+      out.push({
+        name: meta.name,
+        description: meta.description,
+        ...(meta.whenToUse === undefined ? {} : { whenToUse: meta.whenToUse }),
+        path: file,
+        modelInvocable: meta.modelInvocable,
+        source: root.source,
+        rank: root.rank,
+      });
+      continue;
+    }
+
+    // 形态二：平铺文件 `<name>.md`
+    if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
+      const file = join(root.path, entry.name);
+      let raw: string;
+      try {
+        const info = await stat(file);
+        if (!info.isFile() || info.size > MAX_SKILL_BYTES) continue;
+        raw = await readFile(file, 'utf8');
+      } catch {
+        continue;
+      }
+      const meta = parseFrontmatter(raw);
+      if (meta?.name === undefined || meta.name === '' || meta.description === undefined) continue;
+      out.push({
+        name: meta.name,
+        description: meta.description,
+        ...(meta.whenToUse === undefined ? {} : { whenToUse: meta.whenToUse }),
+        path: file,
+        modelInvocable: meta.modelInvocable,
+        source: root.source,
+        rank: root.rank,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 扫描所有技能根，并按名字裁决重名（rank 小的胜出）。
+ *
+ * 与 DSH 注册表的裁决规则一致：同一个名字出现多次时，优先级高的来源胜出；
+ * 这样「项目里覆盖了用户技能」这类常见用法才有预期行为。
+ *
+ * @param cwd - 会话工作目录。
+ * @param customDirs - 额外的自定义目录。
+ * @returns 裁决后的技能列表。
+ */
+async function scanSkills(cwd: string, customDirs: readonly string[]): Promise<ScannedSkill[]> {
+  const roots = await skillRootsFor(cwd, customDirs);
+  const found = (await Promise.all(roots.map((root) => scanSkillRoot(root)))).flat();
+
+  const byName = new Map<string, ScannedSkill>();
+  for (const skill of found) {
+    const existing = byName.get(skill.name);
+    // 同 rank 时后来的不覆盖先来的，保持确定性。
+    if (existing === undefined || skill.rank < existing.rank) byName.set(skill.name, skill);
+  }
+  return [...byName.values()];
+}
+
+/**
+ * 读出注册表里登记在册的提供方名字（诊断用）。
+ *
+ * 官方注册表没有公开这个信息，只能顺着 `layers.global.providers` 读它的键。
+ * 这是**内部结构**，随时可能变 —— 所以全程容错：读不到就返回空数组，
+ * 绝不让诊断影响功能。
+ *
+ * @param skills - 注册表（可能不存在或结构不符）。
+ * @returns 提供方名字数组。
+ */
+export function readRegisteredProviders(skills: SkillRegistryFacade | null): string[] {
+  try {
+    const providers = skills?.layers?.global?.providers;
+    if (providers === undefined || providers === null) return [];
+    if (providers instanceof Map) return [...providers.keys()];
+    if (typeof providers.keys === 'function') return [...providers.keys()];
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 列出当前可见的技能。
+ *
+ * 数据全部来自官方注册表；本函数只做两件注册表不管的事：
+ * 1. 决定用哪个工作目录去问（先问会话登记表，退到进程 cwd）；
+ * 2. 顺手盘一下技能目录里的图标文件。
+ *
+ * @param skills - 官方 skill 注册表（可能不存在）。
+ * @param sessions - 会话登记表（可能不存在）。
+ * @returns 技能列表与所用工作目录。
+ */
+export async function listSkills(
+  skills: SkillRegistryFacade | null,
+  sessions: SessionRegistryFacade | null,
+  customDirs: readonly string[] = [],
+): Promise<SkillListing> {
+  // 项目级技能（`<项目根>/.dsh/skills`）要靠工作目录才能找到，所以先问会话登记表。
+  // 进程 cwd 是安装目录，拿它去问会漏掉项目级技能。
+  const cwd = await resolveSessionCwd(sessions);
+
+  // ---- 1) 先扫磁盘（这是用户自己的技能的唯一可靠来源，见上方注释）----
+  // 宿主平面读不到 preset 层的 skill-filesystem，所以不能只靠注册表。
+  let scanned: ScannedSkill[] = [];
+  let scannedComplete = true;
+  try {
+    scanned = await scanSkills(cwd, customDirs);
+  } catch {
+    scannedComplete = false;
+  }
+
+  if (skills === null || (typeof skills.list !== 'function' && typeof skills.snapshot !== 'function')) {
+    // 没有注册表也要能把扫描到的技能给出来：内置技能看不到，但用户技能照常。
+    return finishListing(cwd, scanned, [], false, scannedComplete, skills);
+  }
+
+  let raw: readonly unknown[] = [];
+  let complete = true;
+  try {
+    if (typeof skills.snapshot === 'function') {
+      const snapshot = await skills.snapshot({ cwd });
+      raw = Array.isArray(snapshot?.skills) ? snapshot.skills : [];
+      complete = snapshot?.complete !== false;
+    } else if (typeof skills.list === 'function') {
+      const listed = await skills.list({ cwd });
+      raw = Array.isArray(listed) ? listed : [];
+    }
+  } catch {
+    // 注册表整体出错时不影响扫描结果，只是少了内置技能。
+    return finishListing(cwd, scanned, [], true, false, skills);
+  }
+
+  const fromRegistry: SkillSummary[] = [];
+  /** 提供方名字集合：注册表的 summary 里带 `provider`（哪些提供方真的供了技能）。 */
+  const providers = new Set<string>();
+  for (const item of raw) {
+    const skill = normalizeSkill(item);
+    if (skill === null) continue;
+    fromRegistry.push(skill);
+    const provider = (item as Record<string, unknown>).provider;
+    if (typeof provider === 'string' && provider !== '') providers.add(provider);
+  }
+
+  return finishListing(cwd, scanned, fromRegistry, true, scannedComplete && complete, skills);
+}
+
+/**
+ * 把「扫描结果」与「注册表结果」合并成最终列表。
+ *
+ * 合并规则：
+ * 1. **扫描优先**：扫描出来的带真实 `path`，能直接打开正文；注册表里同名的
+ *    （宿主平面通常读不到 preset 层，所以一般没有）让位。
+ * 2. 注册表独有的（内置技能，如 Office 三件套）保留，它们没有 path，
+ *    界面标「内置」，正文走 token 换。
+ *
+ * @param cwd - 本次使用的工作目录。
+ * @param scanned - 磁盘扫描结果。
+ * @param fromRegistry - 注册表结果。
+ * @param available - 注册表是否可用。
+ * @param complete - 发现是否完整。
+ * @param skills - 注册表（只用来读诊断信息）。
+ * @returns 最终响应。
+ */
+async function finishListing(
+  cwd: string,
+  scanned: readonly ScannedSkill[],
+  fromRegistry: readonly SkillSummary[],
+  available: boolean,
+  complete: boolean,
+  skills: SkillRegistryFacade | null,
+): Promise<SkillListing> {
+  const list: SkillSummary[] = [];
+  const seen = new Set<string>();
+
+  for (const skill of scanned) {
+    if (seen.has(skill.name)) continue;
+    seen.add(skill.name);
+    list.push({
+      name: skill.name,
+      description: skill.description,
+      ...(skill.whenToUse === undefined ? {} : { whenToUse: skill.whenToUse }),
+      path: skill.path,
+      modelInvocable: skill.modelInvocable,
+      source: skill.source,
+    });
+  }
+  for (const skill of fromRegistry) {
+    if (seen.has(skill.name)) continue;
+    seen.add(skill.name);
+    // 来自注册表、又不在磁盘上的，一定是插件自带的（bundled）。
+    list.push({ ...skill, source: 'bundled' });
+  }
+  list.sort((a, b) => a.name.localeCompare(b.name));
+
+  // 图标既可能出现在 SKILL.md 所在目录，也可能在 resourceBase 指的目录，
+  // 两者都扫一遍（插件内置技能只有后者）。
+  const dirs: string[] = [];
+  for (const skill of list) {
+    for (const dir of [skill.path === undefined ? undefined : dirname(skill.path), skill.resourceDir]) {
+      if (dir === undefined || dirs.includes(dir)) continue;
+      dirs.push(dir);
+    }
+  }
+  const icons = dirs.length === 0 ? {} : await readSkillIcons(dirs);
+
+  // 给「没有文件的内置技能」各发一个不透明 token，客户端拿它换正文。
+  // token 每次列表都重发，且与技能名不对应，客户端无法伪造去取未列出的技能。
+  const inline: Record<string, string> = {};
+  for (const skill of list) {
+    if (skill.path !== undefined) continue;
+    const token = randomBytes(12).toString('hex');
+    inline[token] = skill.name;
+  }
+
+  return {
+    available,
+    cwd,
+    complete,
+    skills: list,
+    icons,
+    inline,
+    // 合并后的来源：扫描出来的按来源分组记，注册表来的记成 bundled。
+    providers: [
+      ...new Set([
+        ...scanned.map((skill) => String(skill.source)),
+        ...(fromRegistry.length > 0 ? ['bundled'] : []),
+      ]),
+    ],
+    askedCwd: cwd,
+    registeredProviders: readRegisteredProviders(skills),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // 路径安全
@@ -607,6 +1351,9 @@ async function readJsonBody(
 }
 
 /** 路由路径（客户端 bundle 镜像这些字面量）。 */
+/** 本插件在 profile 的 `cordis.patch.yml` 里的行 id（写配置时按它找条目）。 */
+const ENTRY_ID = 'ui-notes';
+
 export const ROUTES = {
   list: '/api/dsh-notes/list',
   read: '/api/dsh-notes/read',
@@ -616,6 +1363,10 @@ export const ROUTES = {
   move: '/api/dsh-notes/move',
   health: '/api/dsh-notes/health',
   latestVersion: '/api/dsh-notes/latest-version',
+  skills: '/api/dsh-notes/skills',
+  skillContent: '/api/dsh-notes/skill-content',
+  readSkillFile: '/api/dsh-notes/read-skill-file',
+  config: '/api/dsh-notes/config',
 } as const;
 
 /** 一条路由的形状（与 ctx.webServer.register 兼容）。 */
@@ -649,11 +1400,138 @@ interface Logger {
  * 构造全部 /api/dsh-notes 路由。
  * @param logger - 宿主 logger。
  * @param config - 已解析的插件配置。
+ * @param optional - 插件存在才用到的官方服务（缺失时对应路由降级，不影响其余功能）。
  * @returns 路由列表。
  */
-export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
-  const maxReadBytes = config.maxReadBytes ?? 8 * 1024 * 1024;
-  const maxWriteBytes = config.maxWriteBytes ?? 8 * 1024 * 1024;
+export function makeRoutes(
+  logger: Logger,
+  config: Config = {},
+  optional: {
+    skills?: unknown;
+    sessions?: unknown;
+    /** 配置写回通道（`ctx.configEditor`），用来把插件页的开关落进 profile。 */
+    configEditor?: unknown;
+    /** 可选服务读取器：传了就在每次用到时现取，避免 apply 时序把能力定死。 */
+    resolveOptional?: (name: string) => unknown;
+  } = {},
+): Route[] {
+  /**
+   * 取当前配置。
+   *
+   * 配置对象是**活的**：`.volatile()` 字段改动不会重启插件（见 `ConfigSchema`
+   * 上面的说明），cordis 只把新值写回运行中 fiber 的 `config`。所以每次用到
+   * 都得现读，不能在 apply 阶段做一份快照 —— 那样用户在插件页关掉技能阅读，
+   * 服务端还在按「开」放行，两边对不上。
+   */
+  /**
+   * 读一个配置项并**拆掉 volatile 包装**。
+   *
+   * schemastery 的 `.volatile()` 不只是打个标记：解析结果里该字段是一个
+   * `{ get(), [volatile.write]() }` 访问器对象，不是原始值。直接写
+   * `config.skillsReading !== false` 永远为真 —— 关掉开关也关不掉。
+   * DSH 自己也是先 `isVolatile(value)` 再 `value.get()`（见 dsh-settings 的
+   * `plainConfig`），这里照做。
+   *
+   * @param key - 配置字段名。
+   * @returns 原始值；没有该字段时为 undefined。
+   */
+  const readConfig = <K extends keyof Config>(key: K): Config[K] => {
+    const raw = config?.[key] as unknown;
+    if (isVolatile(raw as never)) {
+      try {
+        return (raw as { get: () => Config[K] }).get();
+      } catch {
+        return undefined;
+      }
+    }
+    return raw as Config[K];
+  };
+
+  /**
+   * 读 profile 里**已经落盘**的配置值（本插件这一行）。
+   *
+   * 为什么需要它：`readConfig()` 读的是运行中 fiber 的值，而 volatile 字段要等
+   * `loader._commitVolatile()` 才跟上，存在一个短窗口 —— 刚保存完立刻读，
+   * 可能还是旧值（表现为「第一次保存被还原，第二次才生效」）。
+   * `configEditor.configuration()` 读的是补丁文件本身，写盘成功即成立。
+   *
+   * @returns 落盘值；没有该服务或没有这一行时返回 null。
+   */
+  const storedConfig = (): Record<string, unknown> | null => {
+    const editor = configEditorNow();
+    if (typeof editor?.configuration !== 'function') return null;
+    try {
+      const rows = editor.configuration();
+      const row = rows.find((item) => item.entry?.options?.id === ENTRY_ID);
+      if (row === undefined) return null;
+      // 覆盖层优先；它不存在时退回继承层（profile bundle 的默认值）。
+      const override = row.override;
+      return typeof override === 'object' && override !== null ? override : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * 取一个配置项：**落盘值优先，其次运行中值，最后默认值**。
+   *
+   * @param key - 字段名。
+   * @returns 生效值。
+   */
+  const effective = <K extends keyof Config>(key: K): Config[K] => {
+    const stored = storedConfig();
+    if (stored !== null && Object.hasOwn(stored, key as string)) {
+      return stored[key as string] as Config[K];
+    }
+    return readConfig(key);
+  };
+
+  const maxRead = () => effective('maxReadBytes') ?? 8 * 1024 * 1024;
+  const maxWrite = () => effective('maxWriteBytes') ?? 8 * 1024 * 1024;
+
+  // 技能路由要用的两个官方服务。都按「最小面」收窄并允许缺失：
+  // 精简 profile 没挂 skill 注册表时，「技能」入口只显示一句可读提示，
+  // 笔记本身的读写不受任何影响。
+  //
+  // 同样「现取」：apply 可能比 skill 插件先执行，那时 `ctx.get('skills')` 还是空的，
+  // 一次取值定终身会让技能列表永远报「没有注册表」。
+  const optionalNow = (name: 'skills' | 'sessions'): unknown =>
+    optional.resolveOptional === undefined ? optional[name] : optional.resolveOptional(name);
+  const skillRegistryNow = (): SkillRegistryFacade | null =>
+    (optionalNow('skills') ?? null) as SkillRegistryFacade | null;
+  const sessionRegistryNow = (): SessionRegistryFacade | null =>
+    (optionalNow('sessions') ?? null) as SessionRegistryFacade | null;
+
+  /**
+   * 取配置写回通道。
+   *
+   * DSH 的插件配置**没有**「插件自己写配置」的公开接口；唯一正规路径是
+   * `ctx.configEditor.edit(entry, change)` —— 它把新值合并进 profile 的
+   * cordis.patch.yml，再由 Loader 走 `internal/config` 重新解析。这样写进去的
+   * 值重启后仍在，也仍然受「只能改 volatile 字段」的校验约束。
+   *
+   * @returns 通道；精简部署没有该服务时为 null。
+   */
+  const configEditorNow = (): ConfigEditorFacade | null =>
+    ((optional.resolveOptional === undefined ? optional.configEditor : optional.resolveOptional('configEditor')) ??
+      null) as ConfigEditorFacade | null;
+
+  /** 技能阅读总开关：关掉后两条技能路由都返回 404（入口本身也不会出现）。 */
+  const skillsReading = (): boolean => effective('skillsReading') !== false;
+  /** 额外的技能根目录。 */
+  const skillRoots = (): string[] => {
+    const roots = effective('skillRoots');
+    return Array.isArray(roots) ? roots : [];
+  };
+
+  /**
+   * 内置技能正文的 token 表：token → { name, cwd, at }。
+   *
+   * 每次列技能都重发一遍，只保留最近一次列出的那批（换掉 token 表而不是往里
+   * 追加，避免无限增长）；30 分钟还会整体过期，重启后自然清空。
+   */
+  let skillTokens = new Map<string, { name: string; cwd: string; at: number }>();
+  const SKILL_TOKEN_TTL_MS = 30 * 60 * 1000;
 
   /** 围栏 + 方法校验。 */
   const guard = (req: RouteRequest, res: RouteResponse, method: string): boolean => {
@@ -731,8 +1609,9 @@ export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
 
           const info = await stat(target);
           if (!info.isFile()) throw new HttpError(400, 'not a regular file');
-          if (info.size > maxReadBytes) {
-            throw new HttpError(413, `file exceeds ${maxReadBytes} bytes`);
+          const limit = maxRead();
+          if (info.size > limit) {
+            throw new HttpError(413, `file exceeds ${limit} bytes`);
           }
 
           const content = await readFile(target, 'utf8');
@@ -755,7 +1634,8 @@ export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
       handler: async (req, res) => {
         if (!guard(req, res, 'POST')) return;
         try {
-          const body = await readJsonBody(req, maxWriteBytes + 64 * 1024);
+          const limit = maxWrite();
+          const body = await readJsonBody(req, limit + 64 * 1024);
           if (body === null) throw new HttpError(400, 'invalid JSON body');
 
           const { path, root, content } = body as {
@@ -764,8 +1644,8 @@ export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
             content?: unknown;
           };
           if (typeof content !== 'string') throw new HttpError(400, 'content must be a string');
-          if (Buffer.byteLength(content, 'utf8') > maxWriteBytes) {
-            throw new HttpError(413, `content exceeds ${maxWriteBytes} bytes`);
+          if (Buffer.byteLength(content, 'utf8') > limit) {
+            throw new HttpError(413, `content exceeds ${limit} bytes`);
           }
 
           const { target } = resolveInsideRoot(String(path ?? ''), String(root ?? ''));
@@ -790,7 +1670,8 @@ export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
       handler: async (req, res) => {
         if (!guard(req, res, 'POST')) return;
         try {
-          const body = await readJsonBody(req, maxWriteBytes + 64 * 1024);
+          const limit = maxWrite();
+          const body = await readJsonBody(req, limit + 64 * 1024);
           if (body === null) throw new HttpError(400, 'invalid JSON body');
 
           const { root, name, content } = body as {
@@ -827,8 +1708,8 @@ export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
           }
 
           const text = typeof content === 'string' ? content : '';
-          if (Buffer.byteLength(text, 'utf8') > maxWriteBytes) {
-            throw new HttpError(413, `content exceeds ${maxWriteBytes} bytes`);
+          if (Buffer.byteLength(text, 'utf8') > limit) {
+            throw new HttpError(413, `content exceeds ${limit} bytes`);
           }
 
           await mkdir(rootDir, { recursive: true });
@@ -914,6 +1795,9 @@ export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
           canDelete: CAN_DELETE,
           platform: process.platform,
           localInstall: LOCAL_INSTALL,
+          // 技能阅读开关：客户端据此决定是否显示入口（服务端另有一道 404 校验）。
+          // 现读而不是快照 —— 用户在插件页一关，这个值立刻反映出来。
+          skillsReading: skillsReading(),
         });
       },
     },
@@ -928,6 +1812,230 @@ export function makeRoutes(logger: Logger, config: Config = {}): Route[] {
           const fresh = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('fresh') === '1';
           const result = await latestPublishedVersion(logger, fresh);
           writeJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          fail(res, error);
+        }
+      },
+    },
+
+    // ---- 读 / 写本插件的配置（插件页的「笔记设置」用）----
+    //
+    // 为什么不走 DSH 的 settings 表单：那套要求插件在客户端持有 `configForms`
+    // 服务，并且依赖 `SettingsFormModel` 的内部约定；官方 `dsh-workbuddy-connect`
+    // 的做法更稳 —— 配置页自己画，值走插件自己的 HTTP 路由。我们本来就有
+    // 一套路由体系（含 loopback 围栏），复用它是改动最小、耦合最低的路。
+    {
+      kind: 'exact',
+      path: ROUTES.config,
+      handler: async (req, res) => {
+        if (!guard(req, res, req.method === 'POST' ? 'POST' : 'GET')) return;
+
+        // GET：把当前生效值读给界面。全部是布尔/数字/字符串数组，可安全外发。
+        if (req.method !== 'POST') {
+          writeJson(res, 200, {
+            ok: true,
+            values: {
+              skillsReading: skillsReading(),
+              skillRoots: skillRoots(),
+              maxReadBytes: maxRead(),
+              maxWriteBytes: maxWrite(),
+            },
+            // 能不能写：没有 configEditor 就只能读（精简部署/未来版本变化）。
+            writable: configEditorNow() !== null,
+          });
+          return;
+        }
+
+        // POST：改一个字段，写进 profile 的 cordis.patch.yml。
+        try {
+          const body = await readJsonBody(req, 64 * 1024);
+          if (body === null) throw new HttpError(400, 'invalid JSON body');
+          const patch = body as { values?: unknown };
+          const values = patch.values;
+          if (typeof values !== 'object' || values === null) {
+            throw new HttpError(400, 'expected { values: { ... } }');
+          }
+
+          // 逐项校验：只认本插件 schema 里的四个字段，类型不对就整单拒绝。
+          const next: Record<string, unknown> = {};
+          for (const [key, raw] of Object.entries(values as Record<string, unknown>)) {
+            if (key === 'skillsReading') {
+              if (typeof raw !== 'boolean') throw new HttpError(400, 'skillsReading must be a boolean');
+              next.skillsReading = raw;
+            } else if (key === 'skillRoots') {
+              if (!Array.isArray(raw) || raw.some((item) => typeof item !== 'string')) {
+                throw new HttpError(400, 'skillRoots must be an array of strings');
+              }
+              next.skillRoots = raw;
+            } else if (key === 'maxReadBytes' || key === 'maxWriteBytes') {
+              if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
+                throw new HttpError(400, `${key} must be a positive number`);
+              }
+              next[key] = raw;
+            } else {
+              throw new HttpError(400, `unknown config field: ${key}`);
+            }
+          }
+          if (Object.keys(next).length === 0) throw new HttpError(400, 'no values to write');
+
+          const editor = configEditorNow();
+          if (editor === null || typeof editor.edit !== 'function' || typeof editor.entries !== 'function') {
+            throw new HttpError(501, '当前部署不支持从界面修改插件配置');
+          }
+
+          // 找到本插件这一行：DSH 的 profile 行 id 就是 cordis.patch.yml 里的 id。
+          const entry = (editor.entries() as { options?: { id?: string } }[]).find(
+            (row) => row.options?.id === ENTRY_ID,
+          );
+          if (entry === undefined) throw new HttpError(409, `没有找到插件条目 ${ENTRY_ID}`);
+
+          /** 本次写进去的完整配置（在 change 回调里算出来，用于回给客户端）。 */
+          let written: Record<string, unknown> = {};
+          await editor.edit(entry, (current) => {
+            const base =
+              typeof current === 'object' && current !== null ? { ...(current as Record<string, unknown>) } : {};
+            written = { ...base, ...next };
+            return written;
+          });
+
+          /*
+           * 回给客户端的必须是**刚写进去的值**，不是「现读一次」。
+           *
+           * 原因：`.volatile()` 字段的生效路径是
+           *   edit() → 写 profile 补丁 → reconcile → loader._commitVolatile()
+           *   把新值 updateVolatile 进运行中 fiber 的 ref
+           * 这条链是异步的，`edit()` 返回不代表 ref 已经换新。此时去读
+           * `skillsReading()` 拿到的还是旧值，客户端拿它刷新界面，就表现为
+           * 「第一次保存被还原成保存前的状态，第二次才生效」。
+           *
+           * 写盘成功 = 值已经成立（重启后读到的就是它），所以直接回写进去的
+           * 值；volatile ref 会在随后几毫秒内自己跟上。
+           */
+          writeJson(res, 200, {
+            ok: true,
+            values: {
+              skillsReading: written.skillsReading !== false,
+              skillRoots: Array.isArray(written.skillRoots) ? written.skillRoots : [],
+              maxReadBytes: typeof written.maxReadBytes === 'number' ? written.maxReadBytes : maxRead(),
+              maxWriteBytes: typeof written.maxWriteBytes === 'number' ? written.maxWriteBytes : maxWrite(),
+            },
+          });
+        } catch (error) {
+          fail(res, error);
+        }
+      },
+    },
+
+    // ---- 列出技能（只读；数据来自 DSH 官方 skill 注册表）----
+    {
+      kind: 'exact',
+      path: ROUTES.skills,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'GET')) return;
+        if (!skillsReading()) {
+          writeJson(res, 404, { error: '技能阅读已在插件配置中关闭' });
+          return;
+        }
+        try {
+          // 只读接口、不碰任何磁盘路径参数，因此不需要 root 围栏：
+          // 它不读用户指定的文件，只回报注册表已经裁决好的那份目录。
+          const result = await listSkills(skillRegistryNow(), sessionRegistryNow(), skillRoots());
+          // 重新发一批 token：**整表替换**（不是追加），所以刷新列表后旧 token 立即作废。
+          // 追加看起来「更宽容」，但会让 token 表随刷新无限增长，也失去了
+          // 「token 只代表我最近看到的那份清单」这个语义。
+          const now = Date.now();
+          const next = new Map<string, { name: string; cwd: string; at: number }>();
+          for (const [token, name] of Object.entries(result.inline)) {
+            next.set(token, { name, cwd: result.cwd, at: now });
+          }
+          skillTokens = next;
+          writeJson(res, 200, { ok: true, ...result });
+        } catch (error) {
+          fail(res, error);
+        }
+      },
+    },
+
+    // ---- 读一个技能文件（不改文件夹、不依赖用户选中的根）----
+    {
+      kind: 'exact',
+      path: ROUTES.readSkillFile,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'GET')) return;
+        if (!skillsReading()) {
+          writeJson(res, 404, { error: '技能阅读已在插件配置中关闭' });
+          return;
+        }
+        try {
+          const raw = query(req, 'path');
+          if (raw === undefined || raw === '') throw new HttpError(400, 'expected ?path=<abs>');
+
+          // 这里**没有**用户选的根目录可用 —— 技能不在笔记目录里。
+          // 所以围栏换成「必须在技能根目录之内」：只允许读 DSH 约定的那几个
+          // 技能位置（以及配置里追加的），其余一律 403。
+          const cwd = await resolveSessionCwd(sessionRegistryNow());
+          const roots = await skillRootsFor(cwd, skillRoots());
+          const target = resolve(raw);
+          const inside = roots.some((root) => {
+            const base = resolve(root.path);
+            return target === base || target.startsWith(base.endsWith(sep) ? base : base + sep);
+          });
+          if (!inside) throw new HttpError(403, 'path is outside the skill roots');
+
+          const info = await stat(target);
+          if (!info.isFile()) throw new HttpError(400, 'not a regular file');
+          const limit = maxRead();
+          if (info.size > limit) throw new HttpError(413, `file exceeds ${limit} bytes`);
+
+          writeJson(res, 200, {
+            path: target,
+            content: await readFile(target, 'utf8'),
+            size: info.size,
+            mtimeMs: info.mtimeMs,
+          });
+        } catch (error) {
+          fail(res, error);
+        }
+      },
+    },
+
+    // ---- 读一条「没有文件」的内置技能的正文 ----
+    {
+      kind: 'exact',
+      path: ROUTES.skillContent,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'GET')) return;
+        if (!skillsReading()) {
+          writeJson(res, 404, { error: '技能阅读已在插件配置中关闭' });
+          return;
+        }
+        try {
+          const token = query(req, 'token');
+          if (token === undefined || token === '') {
+            throw new HttpError(400, 'expected ?token=<opaque>');
+          }
+          const entry = skillTokens.get(token);
+          if (entry === undefined || Date.now() - entry.at > SKILL_TOKEN_TTL_MS) {
+            // 过期或没发过：让客户端重新列一次技能（那里会发新 token）。
+            throw new HttpError(410, '技能清单已过期，请重新打开技能页');
+          }
+          const registry = skillRegistryNow();
+          if (registry === null || typeof registry.get !== 'function') {
+            throw new HttpError(501, '当前环境不支持读取内置技能正文');
+          }
+
+          // 名字只从 token 表里取，不接受客户端直接给技能名 —— 否则这个接口就成了
+          // 「按名字读任意技能」的通用入口。cwd 也沿用列表时那次的，保证看到的
+          // 与列表里的同一条技能。
+          const skill = await registry.get(entry.name, { cwd: entry.cwd });
+          if (skill === undefined || skill === null) {
+            throw new HttpError(404, `技能 ${entry.name} 已经不存在了`);
+          }
+          writeJson(res, 200, {
+            ok: true,
+            name: entry.name,
+            content: typeof skill.content === 'string' ? skill.content : '',
+          });
         } catch (error) {
           fail(res, error);
         }
@@ -952,6 +2060,15 @@ export interface PluginContext {
    * @param label - 便于排查的标签。
    */
   effect(callback: () => () => void, label?: string): void;
+  /**
+   * 可选服务读取（cordis 的 `ctx.get`，**不经过 inject 服务门控**）。
+   *
+   * 「技能」入口要用官方的 skill 注册表与会话表，但它们刻意**没写进 `inject`**：
+   * inject 是加载期硬依赖，声明了就会等那个服务出现才开始加载本插件 —— 万一某个
+   * DSH 版本或精简 profile 没有 skill 插件，整个笔记功能都会跟着加载不了。
+   * 改用可选读取：拿不到就只有技能入口显示一句提示，笔记读写完全照常。
+   */
+  get?(name: string): unknown;
 }
 
 /**
@@ -960,9 +2077,24 @@ export interface PluginContext {
  * @param config - 已解析的插件配置。
  */
 export function apply(ctx: PluginContext, config?: Config): void {
-  if (config?.enabled === false) return;
+  // 不再看 config.enabled：启停统一由 DSH 插件页的「启用 / 禁用」负责
+  // （它会把整个插件卸载，比我们的开关更彻底）。
 
-  const routes = makeRoutes(ctx.logger, config ?? {});
+  /** 可选服务读取：拿不到（或查找本身抛错）就当作没有。 */
+  const optionalService = (name: string): unknown => {
+    if (typeof ctx.get !== 'function') return undefined;
+    try {
+      return ctx.get(name);
+    } catch {
+      return undefined;
+    }
+  };
+
+  const routes = makeRoutes(ctx.logger, config ?? {}, {
+    // 每次用到时现取：这些服务可能比本插件晚就绪，也不该被 apply 时序定死。
+    // 配置写回通道 `configEditor` 也走这条路 —— 它由 dsh-config-editor 提供。
+    resolveOptional: optionalService,
+  });
   ctx.effect(() => {
     const disposers = routes.map((route) => ctx.webServer.register(route));
     return () => {
@@ -970,3 +2102,14 @@ export function apply(ctx: PluginContext, config?: Config): void {
     };
   }, 'notes: routes');
 }
+
+/**
+ * 把配置 schema 挂到 `apply` 上。
+ *
+ * DSH 的设置框架从 `entry.fiber.runtime.Config` 读 schema 来生成插件页表单
+ * （`dsh-settings` 的 `schema(entry)`：`'toJSON' in schema` 才算数）。
+ * cordis 认为「带 `.Config` 的函数就是一个可配置插件」，所以这样挂上去之后
+ * 插件详情页会自动出现这些选项，无需任何额外注册。
+ */
+apply.Config = ConfigSchema;
+

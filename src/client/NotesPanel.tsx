@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { FileTypeIcon, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primitives';
 import { MarkdownText, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives';
-import { NotesApi, NotesApiError, type DirEntry } from './api';
+import { NotesApi, NotesApiError, type DirEntry, type SkillListing, type SkillSummary } from './api';
 import { MAX_PINNED, NotesStore, type FileVisibility, type NoteTab, type PinLayout } from './store';
 import { ancestorsOf, filterFiles, listAllDirectories, listAllFiles, type FileHit } from './treeOps';
 import { useScrollSync } from './useScrollSync';
@@ -112,6 +112,25 @@ function IconRefresh({ size = 13 }: { size?: number }): JSX.Element {
   );
 }
 
+/**
+ * 技能图标：一个带折角的「技能卡」。
+ *
+ * 与文件图标明确区分开 —— 技能不是文件，用文件图标会让用户以为点开的是
+ * 笔记根目录里的东西。
+ */
+function IconSkill({ size = 13 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} aria-hidden="true">
+      {/* 卡片主体 + 右上折角 */}
+      <path d="M3 2.6h6.2L13 6.4v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-9.8a1 1 0 0 1 1-1Z" />
+      <path d="M9 2.6v3.8h3.8" />
+      {/* 中间一道星芒：表示「可被召唤使用的指令集」 */}
+      <path d="M7.5 8.2v3" />
+      <path d="M6 9.7h3" />
+    </svg>
+  );
+}
+
 /** 加号。 */
 function IconPlus(): JSX.Element {
   return (
@@ -150,6 +169,9 @@ type ViewMode = 'split' | 'edit' | 'preview';
 
 /** 拖拽悬停在文件夹上多久后自动展开（毫秒）。太短会误展开，太长又觉得迟钝。 */
 const DRAG_EXPAND_DELAY_MS = 600;
+
+/** 技能目录页那个单例 tab 的固定 id（不用路径，因为它不是文件）。 */
+const SKILLS_TAB_ID = 'dsh-notes:skills';
 
 /** 置顶并排所需的最小左栏宽度（px）：低于此值单列，保证文件名可读。 */
 const PIN_TWO_COLUMN_MIN_WIDTH = 240;
@@ -222,6 +244,13 @@ export interface NotesPanelProps {
   listApplications: (path: string) => Promise<
     readonly { id: string; name?: string; default?: boolean }[] | null
   >;
+  /**
+   * 「技能」阅读是否启用（插件配置里的开关，默认开）。
+   *
+   * 关掉后入口与技能页都不出现，整个功能就像不存在一样 —— 这是给
+   * 「只想用笔记、不想要额外功能」的用户准备的最小化开关。
+   */
+  skillsEnabled?: () => Promise<boolean>;
 }
 
 /**
@@ -235,6 +264,7 @@ export function NotesPanel({
   openExternal,
   canOpenExternal,
   listApplications,
+  skillsEnabled,
 }: NotesPanelProps): JSX.Element {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const [notice, setNotice] = useState<string | null>(null);
@@ -246,6 +276,38 @@ export function NotesPanel({
   const [menu, setMenu] = useState<{ entry: DirEntry; x: number; y: number } | null>(null);
   /** 待确认删除的条目；非 null 时显示确认弹层。 */
   const [pendingDelete, setPendingDelete] = useState<DirEntry | null>(null);
+
+  /**
+   * 技能阅读是否可用。
+   *
+   * 先按「开」显示：绝大多数用户的配置是开着的，等宿主回话再关，避免入口
+   * 闪一下才消失。宿主不支持这个字段（旧版本）时也保持开。
+   */
+  const [skillsOn, setSkillsOn] = useState(true);
+
+  /** 技能页「重新读取」的转圈反馈（点击后 480ms 内转一圈，与文件树刷新一致）。 */
+  const [skillsRefreshing, setSkillsRefreshing] = useState(false);
+  /** 技能页的重新读取令牌：递增即让技能页再读一次。 */
+  const [skillsRevision, setSkillsRevision] = useState(0);
+
+  /**
+   * 从「技能列表」打开过的文件路径集合。
+   *
+   * 用途：这些文件在阅读器顶部会多一个「← 技能列表」按钮。没有它，
+   * 用户根本分不清「我是在看笔记还是在看技能」—— 打开效果和普通文件一模一样。
+   */
+  const fromSkillsRef = useRef<Set<string>>(new Set());
+  /** 上面那个集合的变更计数（集合本身是 ref，改它不会触发重渲染）。 */
+  const [fromSkillsRev, setFromSkills] = useState(0);
+  /**
+   * 正在阅读的内置技能正文（虚拟文档）。
+   *
+   * 内置技能没有文件，不能做成只读文件 tab：那样「保存」会写向不存在的路径。
+   * 单独一块视图、纯只读，关掉就回到原来的 tab。
+   */
+  const [inlineSkill, setInlineSkill] = useState<
+    { name: string; content?: string; loading?: boolean } | null
+  >(null);
 
   /**
    * 本平台是否支持删除（能否移入系统回收站）。
@@ -301,6 +363,22 @@ export function NotesPanel({
     };
   }, [api]);
 
+  // 问一次「技能阅读」是否启用：关掉就不显示任何技能入口。
+  useEffect(() => {
+    if (typeof skillsEnabled !== 'function') return;
+    let alive = true;
+    skillsEnabled()
+      .then((value) => {
+        if (alive) setSkillsOn(value);
+      })
+      .catch(() => {
+        // 探测失败按开处理：少一个功能入口比整块功能凭空消失更糟。
+      });
+    return () => {
+      alive = false;
+    };
+  }, [skillsEnabled]);
+
   // 同一套思路：先问能不能「在系统文件管理器里定位到文件」，不能就不给入口。
   useEffect(() => {
     let alive = true;
@@ -352,6 +430,115 @@ export function NotesPanel({
     },
     [store],
   );
+
+  /**
+   * 从技能目录点开一条技能：在阅读器里打开它的 SKILL.md。
+   *
+   * 两处与普通文件不同：
+   * 1. 技能通常**不在笔记根目录里**（`~/.dsh/skills/...`），而本插件的读写路由
+   *    有「必须在选中根目录之内」的围栏，直接写进 tab 的话，编辑器一读就会 404。
+   *    所以这里把根切到技能自己所在的目录：围栏仍然生效，只是围成了它的家。
+   * 2. tab 名仍然用真实的 `SKILL.md`：`FileTypeIcon` 与文档头都按名字推类型
+   *    和显示路径，硬改成 `/技能名` 会让图标与路径都对不上。
+   *
+   * @param skill - 技能页点中的那条摘要。
+   */
+  const openSkill = useCallback(
+    (skill: SkillSummary) => {
+      if (skill.path !== undefined) {
+        // 【关键】**完全不碰文件夹**。
+        //
+        // 早期做法是「为了读文件临时把根切到技能目录」，结果适得其反：
+        // 当前文件夹标签变成 `~/.dsh/skills/xxx`，用户真正的工作目录反而
+        // 从历史里消失。现在技能文件走专用的只读接口（`readSkillFile`），
+        // 那条路不需要根目录、也不改任何文件夹状态。
+        //
+        // tab 名仍用真实的 SKILL.md 文件名：`FileTypeIcon` 与文档头都按名字推
+        // 类型/显示路径，写成 `/技能名` 会被当成无扩展名的文件，图标与路径都错。
+        const tab: NoteTab = {
+          id: skill.path,
+          name: basenameOf(skill.path),
+          path: skill.path,
+          kind: 'md',
+        };
+        store.openTab(tab);
+        // 记录「是从技能列表进入的」：这样阅读器顶部会出现「← 技能列表」，
+        // 而不是让人以为这只是又一个普通笔记文件。
+        fromSkillsRef.current.add(skill.path);
+        setFromSkills((value) => value + 1);
+        return;
+      }
+
+      // 插件内置技能（如 Office 三件套）：磁盘上**没有** path，宿主也不给路径。
+      // 正文向宿主换（带列表发的 token），在阅读区开一个只读的虚拟文档 ——
+      // 它没有真正的文件，所以不放进 tab 列表，避免「保存」写到不存在的地方。
+      if (skill.token === undefined) {
+        flash('这条技能既没有文件，也拿不到正文');
+        return;
+      }
+      setInlineSkill({ name: skill.name, loading: true });
+      api
+        .skillContent(skill.token)
+        .then((result) => {
+          setInlineSkill({ name: result.name, content: result.content });
+        })
+        .catch((error: unknown) => {
+          setInlineSkill(null);
+          flash(`读取技能正文失败：${messageOf(error)}`);
+        });
+    },
+    [api, store, flash],
+  );
+
+  /**
+   * 打开技能目录页。
+   *
+   * 做成**单例 tab**：不管点多少次，都只有一个「技能」tab，不会开出一排。
+   * 这样从某个技能回到列表只需点左边的 tab —— 这正是之前「读完了没法返回、
+   * 只能再点一次按钮」的根本解法。
+   *
+   * 打开前记下当前文件夹与当前 tab：切走时还原，避免「看个技能把笔记目录也换了」。
+   */
+  const openSkills = useCallback(() => {
+    const skillsTab: NoteTab = {
+      id: SKILLS_TAB_ID,
+      name: '技能',
+      path: null,
+      kind: 'skills',
+    };
+    setInlineSkill(null);
+    store.openTab(skillsTab);
+  }, [store]);
+
+  /**
+   * 回到列表：如果「技能」tab 还在就直接切过去，否则重新打开。
+   *
+   * 从技能回到列表时顺手把文件夹还原 —— 打开技能期间为了读文件切过根目录，
+   * 回到列表就该回到原来的笔记目录。
+   */
+  const backToSkills = useCallback(() => {
+    const existing = state.tabs.find((tab) => tab.id === SKILLS_TAB_ID);
+    if (existing !== undefined) {
+      store.activateTab(SKILLS_TAB_ID);
+      return;
+    }
+    openSkills();
+  }, [store, state.tabs, openSkills]);
+
+  /**
+   * 点技能 tab：它本身是列表页；从技能正文回来时把文件夹还原。
+   */
+  const activateSkillsTab = useCallback(() => {
+    setInlineSkill(null);
+    store.activateTab(SKILLS_TAB_ID);
+  }, [store]);
+
+  /** 重新读取技能目录：令牌递增，外加一圈旋转反馈。 */
+  const refreshSkills = useCallback(() => {
+    setSkillsRevision((value) => value + 1);
+    setSkillsRefreshing(true);
+    setTimeout(() => setSkillsRefreshing(false), 480);
+  }, []);
 
   /**
    * 打开一个阅读器打不开的文件（.doc/.pdf/.sql 等）。
@@ -510,13 +697,24 @@ export function NotesPanel({
   if (state.root === null) {
     return (
       <div className="dsh-notes">
+        {/* 还没选文件夹时的引导页。
+            技能不依赖笔记目录，所以这里也给一个入口 —— 但选了文件夹之后，
+            技能入口统一收进文件夹下拉，避免左栏出现两处入口。 */}
         <div className="dsh-notes__empty">
           <IconFolder size={30} />
           <h3>还没有选择文件夹</h3>
           <p>选择一个文件夹作为笔记的存放与浏览位置。文件会平铺保存其中，随时可以用外部编辑器打开。</p>
-          <button type="button" className="dsh-notes__btn dsh-notes__btn--primary" onClick={() => void chooseFolder()}>
-            选择文件夹
-          </button>
+          <div className="dsh-notes__emptyactions">
+            <button type="button" className="dsh-notes__btn dsh-notes__btn--primary" onClick={() => void chooseFolder()}>
+              选择文件夹
+            </button>
+            {skillsOn && (
+              <button type="button" className="dsh-notes__btn" onClick={openSkills}>
+                <IconSkill size={13} />
+                看技能
+              </button>
+            )}
+          </div>
         </div>
         {notice !== null && <div className="dsh-notes__hint">{notice}</div>}
       </div>
@@ -548,6 +746,10 @@ export function NotesPanel({
           expanded={state.expanded}
           activePath={activeTab?.path ?? null}
           onChooseFolder={() => void chooseFolder()}
+          onPickRoot={(path) => store.setRoot(path)}
+          onForgetRoot={(path) => store.forgetRoot(path)}
+          recentRoots={state.recentRoots}
+          showSkillsEntry={skillsOn}
           onOpenFile={openFile}
           onOpenPinned={openPinned}
           onTogglePin={togglePin}
@@ -562,49 +764,89 @@ export function NotesPanel({
           onSetPinLayout={(layout) => store.setPinLayout(layout)}
           onOpenExternal={openExternally}
           onNotice={flash}
+          onOpenSkills={skillsOn ? openSkills : undefined}
         />
       )}
 
       <div className="dsh-notes__right">
-        <TabStrip
-          tabs={state.tabs}
-          activeId={state.activeTabId}
-          drafts={state.drafts}
-          onActivate={(id) => store.activateTab(id)}
-          onClose={(id) => store.closeTab(id)}
-          onCloseOthers={(id) => store.closeOthers(id)}
-          onCloseToRight={(id) => store.closeToRight(id)}
-          onCloseAll={() => store.closeAll()}
-          onCreate={() => setCreating(true)}
-          showFolderToggle={narrow}
-          onToggleFolder={() => void chooseFolder()}
-          root={state.root}
-        />
-
-        {activeTab === null ? (
-          <div className="dsh-notes__empty">
-            <h3>没有打开的标签页</h3>
-            <p>从左侧文件树选择一个文件，或点右上角的 + 新建笔记。</p>
-          </div>
-        ) : activeTab.kind === 'external' ? (
-          <ExternalPane
-            key={activeTab.id}
-            tab={activeTab}
-            openExternal={openExternal}
-            canOpenExternal={canOpenExternal}
-            listApplications={listApplications}
-            onNotice={flash}
+        {inlineSkill !== null ? (
+          /* 内置技能正文是独立视图：它没有文件，不该占 tab 位，
+             也不该给「保存」入口。关掉回到刚才的 tab（通常是技能列表）。 */
+          <InlineSkillPane
+            name={inlineSkill.name}
+            content={inlineSkill.content}
+            loading={inlineSkill.loading}
+            onClose={backToSkills}
           />
         ) : (
-          <EditorPane
-            key={activeTab.id}
-            tab={activeTab}
-            root={state.root}
-            api={api}
-            store={store}
-            initialScroll={state.scroll[activeTab.id] ?? 0}
-            onNotice={flash}
-          />
+          <>
+            <TabStrip
+              tabs={state.tabs}
+              activeId={state.activeTabId}
+              drafts={state.drafts}
+              onActivate={(id) => {
+                if (id === SKILLS_TAB_ID) activateSkillsTab();
+                else store.activateTab(id);
+              }}
+              onClose={(id) => store.closeTab(id)}
+              onCloseOthers={(id) => store.closeOthers(id)}
+              onCloseToRight={(id) => store.closeToRight(id)}
+              onCloseAll={() => store.closeAll()}
+              onCreate={() => setCreating(true)}
+              showFolderToggle={narrow}
+              onToggleFolder={() => void chooseFolder()}
+              root={state.root}
+              onMove={(id, slot) => store.moveTab(id, slot)}
+            />
+
+            {activeTab === null ? (
+              <div className="dsh-notes__empty">
+                <h3>没有打开的标签页</h3>
+                <p>从左侧文件树选择一个文件，或点右上角的 + 新建笔记。</p>
+              </div>
+            ) : activeTab.kind === 'skills' ? (
+              /* 技能列表本身就是一个 tab：从技能正文回来点它即可，
+                 不需要额外的「返回」按钮。 */
+              <SkillListPane
+                key={skillsRevision}
+                api={api}
+                onOpen={openSkill}
+                onNotice={flash}
+                onRefresh={refreshSkills}
+                refreshing={skillsRefreshing}
+                onClose={() => store.closeTab(SKILLS_TAB_ID)}
+              />
+            ) : activeTab.kind === 'external' ? (
+              <ExternalPane
+                key={activeTab.id}
+                tab={activeTab}
+                openExternal={openExternal}
+                canOpenExternal={canOpenExternal}
+                listApplications={listApplications}
+                onNotice={flash}
+              />
+            ) : (
+              <EditorPane
+                key={activeTab.id}
+                tab={activeTab}
+                root={state.root}
+                api={api}
+                store={store}
+                initialScroll={state.scroll[activeTab.id] ?? 0}
+                onNotice={flash}
+                // 从技能列表打开的：顶部给一个明确的「← 技能列表」。
+                backLabel={
+                  // fromSkillsRev 只是让「从技能打开」这个标记变化时重渲染一次。
+                  fromSkillsRev >= 0 &&
+                  fromSkillsRef.current.has(activeTab.id) &&
+                  state.tabs.some((tab) => tab.id === SKILLS_TAB_ID)
+                    ? '技能列表'
+                    : undefined
+                }
+                onBack={backToSkills}
+              />
+            )}
+          </>
         )}
 
         {notice !== null && <div className="dsh-notes__hint">{notice}</div>}
@@ -633,10 +875,16 @@ export function NotesPanel({
           onClose={() => setMenu(null)}
           items={[
             { label: '打开', onPick: () => openFile(menu.entry) },
-            {
-              label: state.pinned.includes(menu.entry.path) ? '取消置顶' : '置顶',
-              onPick: () => togglePin(menu.entry.path),
-            },
+            // 技能文件（SKILL.md）属于 DSH 自己的资产，不是用户的笔记：
+            // 置顶会把它混进「我的收藏」，删除更会直接破坏技能。两者都不给。
+            ...(isSkillFile(menu.entry.path)
+              ? []
+              : [
+                  {
+                    label: state.pinned.includes(menu.entry.path) ? '取消置顶' : '置顶',
+                    onPick: () => togglePin(menu.entry.path),
+                  },
+                ]),
             // 定位与删除都属于「对文件本身的操作」，与上面的打开/置顶用分隔线隔开。
             ...(canReveal || canDelete ? [{ separator: true as const }] : []),
             // 文案跟随平台：系统自己怎么叫就怎么写，用户才知道文件会出现在哪。
@@ -648,8 +896,9 @@ export function NotesPanel({
                   },
                 ]
               : []),
-            // 删除只在支持移入系统回收站的平台出现（见 canDelete 的说明）。
-            ...(canDelete
+            // 删除只在支持移入系统回收站的平台出现（见 canDelete 的说明），
+            // 且技能文件一律不给删除入口。
+            ...(canDelete && !isSkillFile(menu.entry.path)
               ? [{ label: '删除', danger: true, onPick: () => setPendingDelete(menu.entry) }]
               : []),
           ]}
@@ -691,6 +940,14 @@ interface SidebarProps {
   expanded: string[];
   activePath: string | null;
   onChooseFolder: () => void;
+  /** 直接切到某个历史文件夹。 */
+  onPickRoot: (path: string) => void;
+  /** 从历史里忘掉某个文件夹。 */
+  onForgetRoot: (path: string) => void;
+  /** 历史文件夹（不含当前的）。 */
+  recentRoots: string[];
+  /** 是否显示「浏览技能…」入口。 */
+  showSkillsEntry: boolean;
   onOpenFile: (entry: DirEntry) => void;
   onOpenPinned: (path: string) => void;
   onTogglePin: (path: string) => void;
@@ -709,6 +966,8 @@ interface SidebarProps {
   onOpenExternal: (entry: DirEntry) => void;
   /** 在树上做一次性提示（定位失败、展开被截断等）。 */
   onNotice: (message: string) => void;
+  /** 打开技能目录页；未提供表示技能阅读被关掉（按钮不渲染）。 */
+  onOpenSkills?: (() => void) | undefined;
 }
 
 /** 文件名搜索框的属性。 */
@@ -904,9 +1163,148 @@ function FileSearch(props: FileSearchProps): JSX.Element {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 文件夹下拉
+// ---------------------------------------------------------------------------
+
+/** 文件夹下拉的属性。 */
+interface FolderMenuProps {
+  /** 当前文件夹。 */
+  root: string;
+  /** 历史文件夹（不含当前的）。 */
+  recent: string[];
+  /** 切到某个文件夹。 */
+  onPick: (path: string) => void;
+  /** 忘掉某个历史文件夹（只删记录）。 */
+  onForget: (path: string) => void;
+  /** 打开系统选择框挑一个新文件夹。 */
+  onBrowse: () => void;
+  /** 是否显示「浏览技能…」（插件配置 skillsReading）。 */
+  showSkills: boolean;
+  /** 打开技能列表。 */
+  onOpenSkills: () => void;
+  onClose: () => void;
+}
+
+/**
+ * 把路径截成「前两级 + … + 末两级」，让长路径在窄栏里也认得出是哪个目录。
+ *
+ * 只做展示，点击仍用完整路径。
+ *
+ * @param path - 绝对路径。
+ * @returns 适合放进下拉的短形式。
+ */
+function shortenPath(path: string): string {
+  const parts = path.split(/[\\/]/).filter((part) => part !== '');
+  if (parts.length <= 3) return path;
+  const tail = parts.slice(-2).join('/');
+  const head = parts.length > 4 ? `…/${tail}` : parts.join('/');
+  return head;
+}
+
+/**
+ * 文件夹下拉：当前目录 + 历史目录 + 「浏览技能…」+「选择其他文件夹…」。
+ *
+ * 为什么做成下拉而不是直接弹系统框：有多个工作区的人每次切换都要面对同一个
+ * 系统对话框、重新点进几层目录，成本很高。历史留在下拉里，一次点击就能回去；
+ * 每项右侧的 × 只删记录，不碰磁盘。
+ *
+ * 下拉是**页面内浮层**（不是系统菜单），因为系统菜单没法在单项里放删除按钮。
+ */
+function FolderMenu(props: FolderMenuProps): JSX.Element {
+  const { root, recent, onPick, onForget, onBrowse, showSkills, onOpenSkills, onClose } = props;
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const onDown = (event: MouseEvent) => {
+      if (ref.current !== null && event.target instanceof Node && ref.current.contains(event.target)) return;
+      onClose();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('mousedown', onDown, true);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onClose);
+    return () => {
+      document.removeEventListener('mousedown', onDown, true);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onClose);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="dsh-notes__foldermenu" ref={ref} role="menu" aria-label="切换文件夹">
+      <div className="dsh-notes__foldermenu-label">当前</div>
+      <div className="dsh-notes__foldermenu-row dsh-notes__foldermenu-row--current" title={root}>
+        <IconCheck size={11} />
+        <span className="dsh-notes__foldermenu-name">{shortenPath(root)}</span>
+      </div>
+
+      {recent.length > 0 && (
+        <>
+          <div className="dsh-notes__foldermenu-label">最近</div>
+          {recent.map((path) => (
+            <div key={path} className="dsh-notes__foldermenu-row" title={path}>
+              <button
+                type="button"
+                className="dsh-notes__foldermenu-pick"
+                role="menuitem"
+                onClick={() => onPick(path)}
+              >
+                {shortenPath(path)}
+              </button>
+              {/* 删除只作用于「历史记录」，所以放在行内单独的可点区域，
+                  点了不会顺带切换目录。 */}
+              <button
+                type="button"
+                className="dsh-notes__foldermenu-x"
+                title="从历史中移除（不会删除文件夹）"
+                aria-label={`从历史中移除 ${path}`}
+                onClick={() => onForget(path)}
+              >
+                <IconClose size={9} />
+              </button>
+            </div>
+          ))}
+        </>
+      )}
+
+      <div className="dsh-notes__foldermenu-sep" />
+
+      {/* 技能与文件夹是同一类导航（选一个地方看内容），所以放在同一个下拉里，
+          避免左侧栏出现两个并列的下拉。 */}
+      {showSkills && (
+        <button type="button" className="dsh-notes__foldermenu-action" role="menuitem" onClick={onOpenSkills}>
+          <IconSkill size={12} />
+          浏览技能…
+        </button>
+      )}
+      <button type="button" className="dsh-notes__foldermenu-action" role="menuitem" onClick={onBrowse}>
+        <IconFolder size={12} />
+        选择其他文件夹…
+      </button>
+    </div>
+  );
+}
+
+/**
+ * 对勾图标（下拉里标记「当前项」）。
+ * @param props - 尺寸。
+ */
+function IconCheck({ size = 11 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} strokeWidth={2.1} aria-hidden="true">
+      <path d="M3 8.4 6.4 11.8 13 4.6" />
+    </svg>
+  );
+}
+
 /** 左侧：切换文件夹按钮、置顶区、文件树。 */
 function NotesSidebar(props: SidebarProps): JSX.Element {
   const { root, pinned, expanded, activePath } = props;
+  /** 文件夹下拉是否展开。 */
+  const [folderOpen, setFolderOpen] = useState(false);
 
   /** 文件树滚动容器：定位时用它把目标节点滚进视野。 */
   const treeRef = useRef<HTMLDivElement | null>(null);
@@ -1170,12 +1568,55 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
 
   return (
     <div className="dsh-notes__left" ref={sidebarWidth.ref}>
-      {/* 最上方：切换文件夹 */}
-      <button type="button" className="dsh-notes__folder" onClick={props.onChooseFolder} title={root}>
-        <IconFolder size={13} />
-        <span className="dsh-notes__folder-name">{root}</span>
-        <IconCaret />
-      </button>
+      {/* 最上方：文件夹下拉。点开是「当前 + 历史 + 浏览技能 + 选择其他文件夹」，
+          比每次都弹系统选择框省事得多（多工作区场景尤其明显）。 */}
+      <div className="dsh-notes__folderwrap">
+        <button
+          type="button"
+          className="dsh-notes__folder"
+          title={`${root}\n点击切换文件夹`}
+          aria-haspopup="menu"
+          aria-expanded={folderOpen}
+          onClick={() => setFolderOpen((value) => !value)}
+        >
+          <IconFolder size={13} />
+          <span className="dsh-notes__folder-name">{root}</span>
+          <IconCaret />
+        </button>
+        {folderOpen && (
+          <FolderMenu
+            root={root}
+            recent={props.recentRoots}
+            onPick={(path) => {
+              setFolderOpen(false);
+              props.onPickRoot(path);
+            }}
+            onForget={props.onForgetRoot}
+            onBrowse={() => {
+              // 先关菜单，**等菜单真正卸载**再弹系统面板。
+              //
+              // 为什么不能像以前那样直接调：`setFolderOpen(false)` 只是排一个
+              // 重渲染，紧接着就 `pickDirectory()` 的话，系统面板会在「下拉菜单
+              // 还挂在页面上、焦点还在菜单项上」的瞬间弹出来。DSH 自己的工作区
+              // 入口不会这样，它是「点 + → 渲染菜单 → effect 里再打开目录流程」，
+              // 中间隔了完整的 React 提交，因此面板出现时窗口状态是干净的。
+              //
+              // 这里用 requestAnimationFrame 等一帧：此时 React 的提交已经完成、
+              // 菜单已卸载、样式也已应用。相比固定毫秒数，它跟着实际渲染节奏走。
+              setFolderOpen(false);
+              requestAnimationFrame(() => {
+                props.onChooseFolder();
+              });
+            }}
+            showSkills={props.showSkillsEntry}
+            onOpenSkills={() => {
+              setFolderOpen(false);
+              props.onOpenSkills?.();
+            }}
+            onClose={() => setFolderOpen(false)}
+          />
+        )}
+      </div>
 
       {/* 置顶区：数量自适应；标题右侧是单/双栏排版切换 */}
       <div className="dsh-notes__pinned">
@@ -1345,6 +1786,22 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
         >
           {props.fileVisibility === 'all' ? '全部' : '可编辑'}
         </button>
+
+        {/* 技能入口：与文件树并列、但语义独立。
+            技能散落在 ~/.dsh/skills、项目 .dsh/skills 等好几个目录里，不属于
+            「用户选中的这个文件夹」，所以不做成树节点（那会让树错乱），而是
+            一个通往独立目录页的按钮。它读的是 DSH 官方 skill 注册表。 */}
+        {props.onOpenSkills !== undefined && (
+          <button
+            type="button"
+            className="dsh-notes__treebtn dsh-notes__treebtn--skill"
+            title="查看技能（skill）的说明与正文"
+            aria-label="查看技能"
+            onClick={props.onOpenSkills}
+          >
+            <IconSkill />
+          </button>
+        )}
       </div>
 
       {/* 树容器本身也是放置目标：拖到树的空白处 = 移回根目录。
@@ -1723,6 +2180,8 @@ interface TabStripProps {
   onToggleFolder: () => void;
   /** 当前根目录（按钮 title 用）。 */
   root: string;
+  /** 拖动后把某个 tab 放到新位置（坑位按「摘除后」的数组计）。 */
+  onMove: (id: string, slot: number) => void;
 }
 
 /** 标签页右键菜单项。 */
@@ -1751,6 +2210,117 @@ function TabStrip(props: TabStripProps): JSX.Element {
   const [overflowing, setOverflowing] = useState(false);
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const tabsRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * 正在拖动的 tab id，以及拖动过程中的落点预览。
+   *
+   * 与置顶区同一套做法（那边踩过两次坑）：
+   * 1. 用**指针事件**而不是原生 HTML5 拖拽 —— 原生拖拽会把拖动源从 DOM 里
+   *    「摘出来」，一旦重排就触发 dragend，表现为「往后拖不动」。
+   * 2. 拖动期间只改 CSS `order` 做**视觉重排**，DOM 顺序纹丝不动，
+   *    拖动源永远不会被挪走，也就不会中断拖动。
+   */
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [previewOrder, setPreviewOrder] = useState<string[] | null>(null);
+  /** 拖动状态放进 ref：指针回调在闭包里读 state 会读到旧值。 */
+  const dragRef = useRef<{ id: string; order: string[] } | null>(null);
+  /** 刚拖完的那一次 click 要丢掉，否则会误触发「激活」。 */
+  const suppressClickRef = useRef(false);
+
+  /** 越过相邻标签多少像素就切换预览（不必拖过中线）。 */
+  const DRAG_SWAP_EDGE_PX = 8;
+
+  /**
+   * 根据指针横坐标算出落点，并更新预览顺序。
+   *
+   * 判定用的是**相邻标签的内侧边缘**，不是中线：指针一越过邻居的边缘
+   * （再多走几个像素，避免边界抖动）就立刻换位。
+   *
+   * 为什么不用中线：拖过中线意味着指针已经压到邻居的「后半段」，
+   * 视觉上要等很久才动一下，和置顶区的手感不一致。
+   * 用边缘则「刚压上去就让位」，与所见即所得一致。
+   *
+   * @param clientX - 指针横坐标。
+   */
+  const updateDragOrder = useCallback((clientX: number) => {
+    const current = dragRef.current;
+    const container = tabsRef.current;
+    if (current === null || container === null) return;
+
+    const nodes = Array.from(container.querySelectorAll<HTMLElement>('[data-tab-id]'));
+    const rest = current.order.filter((id) => id !== current.id);
+
+    // 【关键】用**指针所在的格子**决定落点，而不是「指针相对某个邻居的位置」。
+    //
+    // 之前按邻居边缘/中线判断，两个方向容易不对称：拖动时邻居靠 CSS order
+    // 让位，读到的矩形一直在变，往回拖时判定会差一格（表现为「向左必须拖到
+    // 最左边」）。改成「指针落在第几格」之后，左右完全对称：
+    // 指针进入某一格 = 目标位置就是那一格。
+    //
+    // 格子边界用**所有标签（含被拖的）**的矩形取，它们的位置不会因为 order 变化。
+    const rects = nodes
+      .map((node) => {
+        const rect = node.getBoundingClientRect();
+        return { id: node.getAttribute('data-tab-id'), left: rect.left, right: rect.right };
+      })
+      .filter((item): item is { id: string; left: number; right: number } => item.id !== null)
+      .sort((a, b) => a.left - b.left);
+
+    // 指针越过第 i 个标签的左边界，就说明目标格 >= i；算到最后一个越过的为止。
+    let slot = 0;
+    for (let i = 0; i < rects.length; i += 1) {
+      if (clientX >= rects[i]!.left + DRAG_SWAP_EDGE_PX) slot = i;
+    }
+    // 被拖标签自己也算一格，但插入点是「摘除后」的下标，所以不能超过 rest 长度。
+    slot = Math.max(0, Math.min(slot, rest.length));
+
+    const order = [...rest.slice(0, slot), current.id, ...rest.slice(slot)];
+    current.order = order;
+    setPreviewOrder(order);
+  }, []);
+
+  /** 开始拖动：记录起点并挂全局监听（指针移出标签栏也要继续跟）。 */
+  const startTabDrag = useCallback(
+    (event: React.MouseEvent, id: string) => {
+      // 只认左键；点在关闭按钮上不算拖动。
+      if (event.button !== 0) return;
+      if ((event.target as HTMLElement).closest('.dsh-notes__tab-x') !== null) return;
+
+      const order = props.tabs.map((tab) => tab.id);
+      dragRef.current = { id, order };
+      setDragId(id);
+      setPreviewOrder(order);
+
+      let moved = false;
+      const onMove = (e: MouseEvent) => {
+        // 拖动超过一点距离才算「拖」，否则当成普通点击。
+        if (!moved && Math.abs(e.clientX - event.clientX) < 4) return;
+        moved = true;
+        updateDragOrder(e.clientX);
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        const final = dragRef.current;
+        dragRef.current = null;
+        setDragId(null);
+        setPreviewOrder(null);
+        if (!moved || final === null) return;
+        // 拖过就不该再触发一次 onClick 激活。
+        suppressClickRef.current = true;
+        setTimeout(() => {
+          suppressClickRef.current = false;
+        }, 0);
+        // 坑位按下标直接取：moveTab 会先摘除再按这个下标插入，
+        // 所以「在最终顺序里的位置」正好就是摘除后数组里的插入点。
+        props.onMove(final.id, final.order.indexOf(final.id));
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [props, updateDragOrder],
+  );
 
   /**
    * 检测标签是否超出可视范围。
@@ -1789,7 +2359,10 @@ function TabStrip(props: TabStripProps): JSX.Element {
   return (
     <div className="dsh-notes__tabsbar">
       {/* 真正滚动的标签区。左右两侧的箭头是它的兄弟节点，不随内容滚走。 */}
-      <div className="dsh-notes__tabs" ref={scrollerRef} onScroll={measure}>
+      <div className={`dsh-notes__tabs${dragId !== null ? ' dsh-notes__tabs--reordering' : ''}`} ref={(node) => {
+        scrollerRef.current = node;
+        tabsRef.current = node;
+      }} onScroll={measure}>
         {/* 窄容器下文件夹栏被收起，把「切换文件夹」挪到 tab 栏最左 */}
         {props.showFolderToggle && (
           <button
@@ -1806,14 +2379,22 @@ function TabStrip(props: TabStripProps): JSX.Element {
         {props.tabs.map((tab) => {
           const active = tab.id === props.activeId;
           const dirty = tab.id in props.drafts;
+          // 拖动预览：按预览顺序给 order，DOM 顺序保持不变（见 startTabDrag 的说明）。
+          const orderIndex = previewOrder === null ? -1 : previewOrder.indexOf(tab.id);
           return (
             <div
               key={tab.id}
-              className={`dsh-notes__tab${active ? ' dsh-notes__tab--active' : ''}`}
+              data-tab-id={tab.id}
+              className={`dsh-notes__tab${active ? ' dsh-notes__tab--active' : ''}${dragId === tab.id ? ' dsh-notes__tab--ghost' : ''}${dragId !== null ? ' dsh-notes__tab--dragging' : ''}`}
               title={tab.path ?? tab.name}
               role="button"
               tabIndex={0}
-              onClick={() => props.onActivate(tab.id)}
+              style={orderIndex >= 0 ? { order: orderIndex } : undefined}
+              onMouseDown={(event) => startTabDrag(event, tab.id)}
+              onClick={() => {
+                if (suppressClickRef.current) return;
+                props.onActivate(tab.id);
+              }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') props.onActivate(tab.id);
               }}
@@ -2179,6 +2760,15 @@ interface EditorPaneProps {
   store: NotesStore;
   initialScroll: number;
   onNotice: (message: string) => void;
+  /**
+   * 有值时在文档头最左侧显示「← 标签」。
+   *
+   * 用于「从技能列表打开的文件」：它的打开效果与普通笔记完全一样，
+   * 不给一个明确去处的话，用户会以为回不去了。
+   */
+  backLabel?: string | undefined;
+  /** 点「←」时的动作。 */
+  onBack?: (() => void) | undefined;
 }
 
 /** 单个 tab 的编辑/预览区。 */
@@ -2207,8 +2797,10 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
 
     let alive = true;
     setLoading(true);
-    api
-      .read(root, tab.path)
+    // 技能文件走专用只读接口：它不需要根目录，因此在技能 tab 里，
+    // 用户当前的笔记文件夹与历史完全不受影响。
+    const request = isSkillFile(tab.path) ? api.readSkillFile(tab.path) : api.read(root, tab.path);
+    request
       .then((file) => {
         if (!alive) return;
         setLoaded(file.content);
@@ -2280,6 +2872,10 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
     setSaving(true);
     try {
       const content = store.getSnapshot().drafts[tab.id] ?? '';
+      if (isSkillFile(tab.path)) {
+        props.onNotice('技能文件是只读的，不能保存修改');
+        return;
+      }
       await api.write(root, tab.path, content);
       // 先更新基线，再清草稿：否则中间那一帧会显示旧内容。
       setLoaded(content);
@@ -2336,6 +2932,17 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
   return (
     <>
       <div className="dsh-notes__dochead">
+        {/* 从技能列表打开的文件：最左边给一个明确的返回入口。 */}
+        {props.backLabel !== undefined && props.onBack !== undefined && (
+          <button
+            type="button"
+            className="dsh-notes__back"
+            title={`回到${props.backLabel}`}
+            onClick={props.onBack}
+          >
+            ← {props.backLabel}
+          </button>
+        )}
         <span className="dsh-notes__docpath" title={tab.path ?? tab.name}>
           {tab.path ?? tab.name}
         </span>
@@ -2414,6 +3021,332 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
         )}
       </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 内置技能正文（只读）
+// ---------------------------------------------------------------------------
+
+/** 内置技能阅读视图属性。 */
+interface InlineSkillProps {
+  name: string;
+  /** 正文；loading 为 true 时还没有。 */
+  content?: string;
+  loading?: boolean;
+  /** 关掉、回到刚才的笔记。 */
+  onClose: () => void;
+}
+
+/**
+ * 插件内置技能的正文（Office 三件套等）。
+ *
+ * 这类技能磁盘上没有 `SKILL.md`，正文由 DSH 注册表在内存里给出，所以：
+ * - **只读**：没有编辑框、没有保存按钮 —— 没有文件可存，给了保存反而是陷阱；
+ * - **不进 tab 列表**：它不是一个文件，关闭就是回到之前的样子。
+ */
+function InlineSkillPane(props: InlineSkillProps): JSX.Element {
+  const { name, content, loading, onClose } = props;
+  return (
+    <div className="dsh-notes__skillpane">
+      <div className="dsh-notes__skillhead">
+        <div className="dsh-notes__skilltitle">
+          <IconSkill size={14} />
+          <code className="dsh-notes__inlineskill-name">/{name}</code>
+          <span className="dsh-notes__skilltag">内置</span>
+        </div>
+        <span className="dsh-notes__skillsearch dsh-notes__inlineskill-note">
+          由 DSH 插件提供，只读
+        </span>
+        <button
+          type="button"
+          className="dsh-notes__treebtn"
+          title="关闭，回到刚才的笔记"
+          aria-label="关闭技能"
+          onClick={onClose}
+        >
+          <IconClose size={11} />
+        </button>
+      </div>
+      <div className="dsh-notes__skillbody">
+        {loading === true ? (
+          <div className="dsh-notes__hint">正在读取…</div>
+        ) : (
+          <div className="dsh-notes__preview">
+            <MarkdownText text={content ?? ''} labels={MARKDOWN_LABELS} variant="body" />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 技能目录页
+// ---------------------------------------------------------------------------
+
+/** 技能目录页属性。 */
+interface SkillListPaneProps {
+  api: NotesApi;
+  /**
+   * 点某条技能时调用。
+   *
+   * 由外壳决定怎么打开：有 `path` 的走阅读器（读 SKILL.md），没有文件的
+   * （插件内置技能）只给提示。
+   */
+  onOpen: (skill: SkillSummary) => void;
+  /** 在面板顶部做成一次性提示。 */
+  onNotice: (message: string) => void;
+  /** 重新读一遍技能目录（在外部新建了技能后点）。 */
+  onRefresh: () => void;
+  /** 重新读取进行中（转圈反馈）。 */
+  refreshing: boolean;
+  /** 关掉技能页、回到刚才的笔记（右上角 ×）。 */
+  onClose: () => void;
+}
+
+/**
+ * 技能目录页：列出当前可用的 skill，点一条在阅读器里看它的 SKILL.md 全文。
+ *
+ * 两个刻意的设计：
+ * 1. **只读**。本插件不启用/禁用 skill、不改任何文件 —— 那是 skill 管理插件的事，
+ *    这里只回答「它写了什么」，避免两套开关互相打架。
+ * 2. **不自己解析文件**。列表来自 DSH 官方 skill 注册表（宿主半边去问），
+ *    正文复用本插件现成的文件读取，所以看到的内容与 Agent 实际加载的完全一致。
+ */
+function SkillListPane(props: SkillListPaneProps): JSX.Element {
+  const { api, onOpen, onNotice, onRefresh, refreshing, onClose } = props;
+  const [listing, setListing] = useState<SkillListing | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  /** 首次读取未完成时先不渲染列表，避免「空 → 有内容」闪一下。 */
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(
+    (fresh: boolean): void => {
+      setLoading(true);
+      api
+        .skills()
+        .then((result) => {
+          setListing(result);
+          setError(null);
+          if (fresh) {
+            const count = result.skills.length;
+            onNotice(count === 0 ? '没有发现技能' : `已读取 ${count} 个技能`);
+          }
+        })
+        .catch((err: unknown) => {
+          setError(messageOf(err));
+          if (fresh) onNotice(`读取技能失败：${messageOf(err)}`);
+        })
+        .finally(() => setLoading(false));
+    },
+    [api, onNotice],
+  );
+
+  // 进页面读一次；宿主那边有注册表就一定有结果，不需要轮询。
+  useEffect(() => {
+    load(false);
+  }, [load]);
+
+  const skills = listing?.skills ?? [];
+  const icons = listing?.icons ?? {};
+
+  /** 按名称/描述过滤（本地过滤，不必再打一次宿主）。 */
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (q === '') return skills;
+    return skills.filter(
+      (skill) =>
+        skill.name.toLowerCase().includes(q) || skill.description.toLowerCase().includes(q),
+    );
+  }, [skills, query]);
+
+  /**
+   * 分成「系统内置」与「我的」两组。
+   *
+   * 内置技能是随 DSH 或其插件自带的（Office 三件套等），数量固定、用户改不了；
+   * 用户自己的才是他真正关心的。混在一起时，内置的往往按字母排在前面，
+   * 把自己写的挤到看不见的地方。
+   */
+  const groups = useMemo(() => {
+    const bundled = shown.filter((skill) => skill.source === 'bundled');
+    const mine = shown.filter((skill) => skill.source !== 'bundled');
+    return { bundled, mine };
+  }, [shown]);
+
+  /**
+   * 取某条技能自带的图标（宿主按「目录 + 相对路径」索引）。
+   *
+   * 目录优先用 `resourceBase`（内置技能只有它），再退到 SKILL.md 所在目录。
+   */
+  const iconFor = (skill: SkillSummary): string | null => {
+    const dirs: string[] = [];
+    if (skill.resourceDir !== undefined) dirs.push(skill.resourceDir);
+    if (skill.path !== undefined) {
+      const dir = dirnameOf(skill.path);
+      if (!dirs.includes(dir)) dirs.push(dir);
+    }
+    for (const dir of dirs) {
+      for (const rel of ['assets/icon.svg', 'assets/icon.png', 'icon.svg', 'icon.png']) {
+        const found = icons[`${dir}\u0000${rel}`];
+        if (found !== undefined) return found;
+      }
+    }
+    return null;
+  };
+
+  /** 渲染一条技能（两组共用，避免两处样式走样）。 */
+  const renderItem = (skill: SkillSummary): JSX.Element => {
+    const icon = iconFor(skill);
+    // 「内置」= 插件提供的技能，磁盘上没有 SKILL.md，正文由宿主从注册表取。
+    const builtin = skill.path === undefined;
+    return (
+      <button
+        type="button"
+        className="dsh-notes__skillitem"
+        title={skill.path ?? `${skill.name}（插件内置，正文由 DSH 提供）`}
+        onClick={() => onOpen(skill)}
+      >
+        <span className="dsh-notes__skillicon">
+          {icon === null ? <IconSkill size={15} /> : <img src={icon} alt="" width={16} height={16} />}
+        </span>
+        <span className="dsh-notes__skilltext">
+          <span className="dsh-notes__skillname">
+            <code>/{skill.name}</code>
+            {!skill.modelInvocable && (
+              <span className="dsh-notes__skilltag" title="只允许用户手动调用">
+                仅手动
+              </span>
+            )}
+            {builtin && (
+              <span className="dsh-notes__skilltag" title="由插件内置，没有独立文件；正文仍可在这里查看">
+                内置
+              </span>
+            )}
+          </span>
+          <span className="dsh-notes__skilldesc">{skill.description}</span>
+        </span>
+      </button>
+    );
+  };
+
+  return (
+    <div className="dsh-notes__skillpane">
+      <div className="dsh-notes__skillhead">
+        <div className="dsh-notes__skilltitle">
+          <IconSkill size={14} />
+          技能
+          {listing !== null && <span className="dsh-notes__skillcount">{skills.length}</span>}
+        </div>
+        <div className="dsh-notes__skillsearch">
+          <input
+            className="dsh-notes__skillinput"
+            type="search"
+            placeholder="按名称或说明筛选"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            aria-label="筛选技能"
+          />
+        </div>
+        {/* 技能目录在磁盘上、由 DSH 热监听；但清单是「进页面时读一次」的，
+            外部刚加了技能文件时点这里重读，免得用户以为没生效。 */}
+        <button
+          type="button"
+          className={refreshing ? 'dsh-notes__treebtn dsh-notes__treebtn--spin' : 'dsh-notes__treebtn'}
+          title="重新读取技能目录"
+          aria-label="重新读取技能目录"
+          onClick={onRefresh}
+        >
+          <IconRefresh />
+        </button>
+        <button
+          type="button"
+          className="dsh-notes__treebtn"
+          title="关闭技能，回到刚才的笔记"
+          aria-label="关闭技能"
+          onClick={onClose}
+        >
+          <IconClose size={11} />
+        </button>
+      </div>
+
+      <div className="dsh-notes__skillbody">
+        {loading && listing === null && <div className="dsh-notes__hint">正在读取技能…</div>}
+
+        {error !== null && (
+          <div className="dsh-notes__skillerror">
+            读取技能失败：{error}
+            <button type="button" className="dsh-notes__btn" onClick={() => load(false)}>
+              重试
+            </button>
+          </div>
+        )}
+
+        {listing !== null && !listing.available && (
+          <div className="dsh-notes__skillempty">
+            <h3>当前环境没有安装技能功能</h3>
+            <p>
+              技能列表由 DSH 的技能插件提供。这个环境没有加载它，所以这里暂时看不到内容；
+              笔记本身的读写不受影响。
+            </p>
+          </div>
+        )}
+
+        {listing !== null && listing.available && shown.length === 0 && (
+          <div className="dsh-notes__skillempty">
+            <h3>{query.trim() === '' ? '还没有技能' : '没有匹配的技能'}</h3>
+            <p>
+              {query.trim() === ''
+                ? '把技能写成 ~/.dsh/skills/<名称>/SKILL.md，或放进项目的 .dsh/skills/ 下，这里就会出现。'
+                : '换个关键词试试。'}
+            </p>
+          </div>
+        )}
+
+        {/* 两组分开：内置在上（数量固定、不可改），自己的在下（用户真正关心的）。 */}
+        {groups.bundled.length > 0 && (
+          <div className="dsh-notes__skillgroup">
+            <div className="dsh-notes__skillgroup-head">
+              系统内置
+              <span className="dsh-notes__skillgroup-count">{groups.bundled.length}</span>
+            </div>
+            <ul className="dsh-notes__skilllist">
+              {groups.bundled.map((skill) => (
+                <li key={skill.name}>{renderItem(skill)}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {groups.mine.length > 0 && (
+          <div className="dsh-notes__skillgroup">
+            <div className="dsh-notes__skillgroup-head">
+              我的技能
+              <span className="dsh-notes__skillgroup-count">{groups.mine.length}</span>
+            </div>
+            <ul className="dsh-notes__skilllist">
+              {groups.mine.map((skill) => (
+                <li key={skill.name}>{renderItem(skill)}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* 诊断行：只回答「这些技能是哪来的、按哪个目录找的」。
+            真实环境里出现过「只列出内置技能」的报障，而本地用同一个注册表能全列出来，
+            把来源摆出来比让人猜快得多。 */}
+        {listing !== null && listing.available && (
+          <div className="dsh-notes__skillfoot">
+            {listing.skills.length} 条 · 供出 {listing.providers?.length ? listing.providers.join('、') : '未知'}
+            {' · 登记 '}
+            {listing.registeredProviders?.length ? listing.registeredProviders.join('、') : '无'}
+            {listing.askedCwd !== undefined && ` · 工作目录 ${listing.askedCwd}`}
+            {listing.complete === false && ' · 部分来源读取失败，列表可能不全'}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -2542,6 +3475,24 @@ function CreateDialog(props: CreateDialogProps): JSX.Element {
 function dirnameOf(path: string): string {
   const i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
   return i <= 0 ? '' : path.slice(0, i);
+}
+
+/**
+ * 这个路径是不是「技能文件」（技能目录里的 `SKILL.md`）。
+ *
+ * 判据刻意用**路径**而不是「是不是从技能页打开的」：
+ * 同一个 SKILL.md 也可能从文件树直接点开、或本来就在置顶里，
+ * 按来源判断会漏掉那些情况。技能文件一律不给置顶/删除入口。
+ *
+ * @param path - 文件绝对路径。
+ * @returns 是技能文件则为 true。
+ */
+function isSkillFile(path: string): boolean {
+  const base = basenameOf(path).toLowerCase();
+  if (base !== 'skill.md') return false;
+  // 目录里带 `.dsh/skills` 或 `.agents/skills` 段，才认定是技能根。
+  const normalized = path.replace(/\\/g, '/').toLowerCase();
+  return normalized.includes('/.dsh/skills/') || normalized.includes('/.agents/skills/');
 }
 
 /** 取路径的文件名部分（同时识别 `/` 与 `\`）。 */

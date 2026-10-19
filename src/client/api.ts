@@ -18,6 +18,9 @@ export const API = {
   move: 'api/dsh-notes/move',
   health: 'api/dsh-notes/health',
   latestVersion: 'api/dsh-notes/latest-version',
+  skills: 'api/dsh-notes/skills',
+  skillContent: 'api/dsh-notes/skill-content',
+  readSkillFile: 'api/dsh-notes/read-skill-file',
 } as const;
 
 /** 宿主能力探测结果。 */
@@ -41,6 +44,12 @@ export interface HostHealth {
    * 插件页的更新控件用它给出「更新会替换本地链接」的提醒。
    */
   localInstall?: boolean;
+  /**
+   * 是否启用「技能」阅读（插件配置 `skillsReading`，默认开）。
+   *
+   * 旧宿主没有这个字段，按「开」处理 —— 那时技能功能本来就存在。
+   */
+  skillsReading?: boolean;
 }
 
 /** 目录项。 */
@@ -66,6 +75,57 @@ export interface FileContent {
   content: string;
   size: number;
   mtimeMs: number;
+}
+
+/** 一条技能的摘要（字段与宿主 `SkillSummary` 对齐）。 */
+export interface SkillSummary {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  /** SKILL.md 的绝对路径；插件内置的技能可能没有文件。 */
+  path?: string;
+  /** 技能目录（内置技能靠它找图标）。 */
+  resourceDir?: string;
+  /**
+   * 内置技能正文的不透明 token（宿主发，用来换正文）。
+   *
+   * 宿主只对「没有文件」的技能发它；有文件的技能直接读文件即可。
+   */
+  token?: string;
+  /** 是否同时暴露给模型。 */
+  modelInvocable: boolean;
+  /** 来源分组：`bundled` 是系统/插件自带，其余是用户自己的。 */
+  source?: 'bundled' | 'project' | 'user' | 'custom';
+}
+
+/** 技能盘点结果。 */
+export interface SkillListing {
+  /** 宿主是否挂载了官方 skill 注册表；false 时界面给出可读提示。 */
+  available: boolean;
+  /** 询问注册表时用的工作目录（调试与提示用）。 */
+  cwd: string;
+  /** 发现是否完整；false 表示有提供方出错，列表可能不全。 */
+  complete: boolean;
+  skills: SkillSummary[];
+  /**
+   * 图标映射：键是「技能目录 + NUL + 图标相对路径」，值是该图标的 data URL。
+   *
+   * 键里带技能目录，是因为不同来源的技能可能有同名图标文件；
+   * 渲染时按「SKILL.md 所在目录 + 图标相对路径」查。
+   */
+  icons: Record<string, string>;
+  /**
+   * 不透明 token → 技能名（宿主用来核对）。
+   *
+   * 客户端把某个技能的 `token` 带上去换正文；这里保留原始映射便于调试。
+   */
+  inline: Record<string, string>;
+  /** 本次技能来自哪些提供方（诊断用，界面上以小字显示）。 */
+  providers?: string[];
+  /** 询问注册表时用的工作目录（项目级技能靠它发现）。 */
+  askedCwd?: string;
+  /** 注册表里登记在册的提供方（不只是这次供出技能的）。诊断用。 */
+  registeredProviders?: string[];
 }
 
 /** 带宿主错误信息的 API 异常。 */
@@ -117,6 +177,43 @@ export class NotesApi {
   /** 把文件或目录移动到另一个目录里（拖拽）。 */
   move(root: string, path: string, to: string): Promise<{ ok: true; from: string; to: string }> {
     return this.request(API.move, { method: 'POST', body: { root, path, to } });
+  }
+
+  /**
+   * 列出当前可见的技能。
+   *
+   * 只读：数据来自 DSH 官方 skill 注册表，本插件不做启用/禁用，也不改任何文件。
+   * 宿主没有注册表时返回 `available: false`，而不是抛错 —— 精简环境下这是正常情况。
+   */
+  skills(): Promise<SkillListing> {
+    return this.request(API.skills);
+  }
+
+  /**
+   * 读一条「没有文件」的内置技能的正文。
+   *
+   * 必须带列表接口发的不透明 token：宿主据此认定「这条技能确实来自上一次列表」，
+   * 不接受按名字随便取。
+   *
+   * @param token - 该技能的 `token`。
+   * @returns 技能名与正文。
+   */
+  skillContent(token: string): Promise<{ ok: true; name: string; content: string }> {
+    return this.request(`${API.skillContent}?token=${encodeURIComponent(token)}`);
+  }
+
+  /**
+   * 读一个技能文件（`SKILL.md`）。
+   *
+   * 与 `read()` 的区别：**不需要根目录参数**，也不需要用户先选文件夹。
+   * 宿主那边用「必须在技能根之内」的围栏替代用户根 —— 这样看技能就不会
+   * 改动、也不会污染用户的文件夹历史。
+   *
+   * @param path - 技能文件绝对路径。
+   * @returns 文件内容。
+   */
+  readSkillFile(path: string): Promise<FileContent> {
+    return this.request(`${API.readSkillFile}?path=${encodeURIComponent(path)}`);
   }
 
   /** 读取宿主能力（目前用于判断本平台是否支持删除）。 */

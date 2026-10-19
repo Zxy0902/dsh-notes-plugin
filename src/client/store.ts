@@ -22,14 +22,29 @@ export interface NoteTab {
    * - `md` 走左编右渲；
    * - `txt` 走单栏编辑；
    * - `external` 阅读器打不开（.doc/.pdf/.sql 等），只显示提示 + 「打开方式」控件。
+   *
+   * 技能的 SKILL.md 也走 `md`（它就是 markdown），不单列一种类型 —— 少一种
+   * 类型就少一处要同步的分支。技能与笔记的区别只在「怎么打开的」。
+   * - `skills` 是技能目录页本身（单例 tab）。把它做成 tab 而不是独立视图，
+   *   是为了让「看过某个技能、想回到列表」有天然的返回路径：点左边的 tab 即可。
    */
-  kind: 'md' | 'txt' | 'external';
+  kind: 'md' | 'txt' | 'external' | 'skills';
 }
+
+/** 文件夹历史最多保留几个。太多会让下拉变成又一份文件树。 */
+export const MAX_RECENT_ROOTS = 8;
 
 /** 面板的持久状态。 */
 export interface NotesState {
   /** 用户选中的根目录（浏览范围）。 */
   root: string | null;
+  /**
+   * 最近用过的文件夹（最近一次在最前，不含当前的 `root`）。
+   *
+   * 多工作区场景下反复弹系统选择框成本很高，所以把历史留在下拉里直接切换；
+   * 每项可以单独删除（只删记录，不碰磁盘）。
+   */
+  recentRoots: string[];
   /** 打开的 tab。 */
   tabs: NoteTab[];
   /** 当前激活的 tab id。 */
@@ -81,6 +96,7 @@ const STORAGE_KEY = 'dsh.notes.v1';
 function emptyState(): NotesState {
   return {
     root: null,
+    recentRoots: [],
     tabs: [],
     activeTabId: null,
     pinned: [],
@@ -105,7 +121,7 @@ function reviveState(raw: unknown): NotesState {
       if (typeof item !== 'object' || item === null) continue;
       const tab = item as Partial<NoteTab>;
       if (typeof tab.id !== 'string' || typeof tab.name !== 'string') continue;
-      if (tab.kind !== 'md' && tab.kind !== 'txt' && tab.kind !== 'external') continue;
+      if (tab.kind !== 'md' && tab.kind !== 'txt' && tab.kind !== 'external' && tab.kind !== 'skills') continue;
       const path = typeof tab.path === 'string' ? tab.path : null;
       // external tab 完全以路径为身份，没有路径就无法恢复，直接丢弃。
       if (tab.kind === 'external' && path === null) continue;
@@ -116,6 +132,12 @@ function reviveState(raw: unknown): NotesState {
   const ids = new Set(tabs.map((tab) => tab.id));
   const activeTabId =
     typeof input.activeTabId === 'string' && ids.has(input.activeTabId) ? input.activeTabId : (tabs[0]?.id ?? null);
+
+  const recentRoots = Array.isArray(input.recentRoots)
+    ? input.recentRoots
+        .filter((item): item is string => typeof item === 'string' && item !== '')
+        .slice(0, MAX_RECENT_ROOTS)
+    : [];
 
   const pinned = Array.isArray(input.pinned)
     ? input.pinned.filter((p): p is string => typeof p === 'string').slice(0, MAX_PINNED)
@@ -141,6 +163,7 @@ function reviveState(raw: unknown): NotesState {
 
   return {
     root: typeof input.root === 'string' ? input.root : null,
+    recentRoots,
     tabs,
     activeTabId,
     pinned,
@@ -215,6 +238,28 @@ export class NotesStore {
     }
   }
 
+  /**
+   * 清掉持久化状态（卸载插件时用）。
+   *
+   * 目的是「不留痕迹」：DSH 的卸载只做 `pnpm remove` + 重载组合，
+   * 不会碰浏览器存储。不清的话，tab / 置顶 / 文件夹历史会一直留在
+   * localStorage 里，重装后突然「复活」一批可能已失效的旧路径。
+   *
+   * 只清存储、不动内存态：插件正在卸载，界面马上就要消失，
+   * 这时候把内存清空反而可能触发一次无意义的重渲染报错。
+   */
+  clearPersistedState(): void {
+    if (this.persistTimer !== null) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // 存储不可用就不用清：本来也没写进去。
+    }
+  }
+
   /** 防抖落盘：输入过程中不写 localStorage，停手 400ms 再写。 */
   private schedulePersist(): void {
     if (this.persistTimer !== null) clearTimeout(this.persistTimer);
@@ -248,10 +293,47 @@ export class NotesStore {
   // 根目录
   // -------------------------------------------------------------------------
 
-  /** 切换浏览根目录：清空 tab 之外的浏览状态，避免残留别的目录的树。 */
-  setRoot(root: string): void {
+  /**
+   * 切换浏览根目录：清空 tab 之外的浏览状态，避免残留别的目录的树。
+   *
+   * 同时把这个目录推进历史（最近的在最前，去掉重复、去掉它自己），
+   * 这样「换回去」不必再弹一次系统选择框。
+   *
+   * @param root - 新根目录。
+   * @param options - `{ remember: false }` 表示这次切换不进历史。
+   *   「打开技能时临时换根」就走这个：技能目录不是用户的工作区，
+   *   把它塞进历史会污染下拉列表、也顶掉用户真正用过的目录。
+   */
+  setRoot(root: string, options: { remember?: boolean } = {}): void {
     if (this.state.root === root) return;
-    this.commit({ ...this.state, root, expanded: [], scroll: {} }, true);
+    const remember = options.remember !== false;
+    const previous = this.state.root;
+    if (typeof console !== 'undefined' && (globalThis as { __NOTES_DEBUG__?: boolean }).__NOTES_DEBUG__) {
+      console.log('[notes][setRoot]', { from: previous, to: root, remember, recent: this.state.recentRoots });
+    }
+    const recentRoots = remember
+      ? [previous, ...this.state.recentRoots].filter(
+          (item): item is string => typeof item === 'string' && item !== '' && item !== root,
+        )
+      : this.state.recentRoots;
+    // 去重（同一个目录可能出现在不同位置）。
+    const unique = [...new Set(recentRoots)].slice(0, MAX_RECENT_ROOTS);
+    this.commit({ ...this.state, root, recentRoots: unique, expanded: [], scroll: {} }, true);
+  }
+
+  /**
+   * 从历史里删掉一个文件夹。
+   *
+   * 只删这条记录，不碰磁盘、也不影响当前根。
+   *
+   * @param path - 要忘记的目录。
+   */
+  forgetRoot(path: string): void {
+    if (!this.state.recentRoots.includes(path)) return;
+    this.commit(
+      { ...this.state, recentRoots: this.state.recentRoots.filter((item) => item !== path) },
+      true,
+    );
   }
 
   /**
@@ -474,6 +556,28 @@ export class NotesStore {
     if (next.every((item, i) => item === pinned[i])) return false;
 
     this.commit({ ...this.state, pinned: next }, true);
+    return true;
+  }
+
+  /**
+   * 把某个 tab 移到另一个位置（拖动排序）。
+   *
+   * 与 `reorderPinned` 同一套约定：用「摘除被拖项后」的目标下标做锚点，
+   * 先摘下来再插入，避免边拖边重排时下标漂移。
+   *
+   * @param id - 被拖动的 tab id。
+   * @param slot - 摘除后数组里的插入位置；超出按末尾处理。
+   * @returns 顺序是否真的变了（回原位返回 false）。
+   */
+  moveTab(id: string, slot: number): boolean {
+    const tabs = this.state.tabs;
+    const index = tabs.findIndex((tab) => tab.id === id);
+    if (index < 0) return false;
+    const rest = tabs.filter((tab) => tab.id !== id);
+    const at = Math.max(0, Math.min(slot, rest.length));
+    const next = [...rest.slice(0, at), tabs[index]!, ...rest.slice(at)];
+    if (next.every((tab, i) => tab.id === tabs[i]?.id)) return false;
+    this.commit({ ...this.state, tabs: next }, true);
     return true;
   }
 
