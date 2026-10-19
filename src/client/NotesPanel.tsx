@@ -175,6 +175,15 @@ const LOCATE_HIGHLIGHT_MS = 1600;
 /** 定位时等待树渲染出来的最大帧数（子目录是懒加载，展开后要几帧才出现）。 */
 const LOCATE_MAX_FRAMES = 40;
 
+/**
+ * 列目录超过这个时间才显示「载入中…」。
+ *
+ * 本地读一个目录通常几毫秒就返回，若立刻显示占位文案，会从「载入中…」跳到
+ * 「空的文件夹」—— 空文件夹最明显，点一下就是一闪。等一小会儿再显示，
+ * 快的路径完全无闪，慢的时候仍有反馈。
+ */
+const SLOW_LISTING_MS = 150;
+
 /** 显示方式的可选项（供 SegmentedControl 使用）。 */
 const VIEW_MODE_OPTIONS = [
   { value: 'edit' as const, label: '编辑' },
@@ -1423,6 +1432,14 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
 
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * 是否已经久到值得显示「载入中…」。
+   *
+   * 本地列一个目录通常只要几毫秒，立刻显示「载入中…」再换成「空的文件夹」，
+   * 视觉上就是**闪一下**（空文件夹尤其明显，因为两个提示文案都短、位置相同）。
+   * 所以先等一小会儿：够快就什么都不显示，直接出结果；慢才给反馈。
+   */
+  const [slow, setSlow] = useState(false);
   /** 拖拽悬停在本目录上（用于高亮 + 自动展开计时）。 */
   const [dropActive, setDropActive] = useState(false);
 
@@ -1444,6 +1461,12 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
     if (!open) return undefined;
 
     let alive = true;
+    // 先当作「快」，150ms 内没回来才显示「载入中…」。
+    setSlow(false);
+    const timer = setTimeout(() => {
+      if (alive) setSlow(true);
+    }, SLOW_LISTING_MS);
+
     props.api
       .list(props.root, path)
       .then((listing) => {
@@ -1458,6 +1481,7 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
 
     return () => {
       alive = false;
+      clearTimeout(timer);
     };
     // treeRevision 变化（新建/删除文件后）会强制重新列这一层。
   }, [open, path, props.root, props.api, props.treeRevision]);
@@ -1518,7 +1542,9 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
         <div className={isRoot === true ? undefined : 'dsh-notes__children'}>
           {error !== null && <div className="dsh-notes__tree-msg">无法读取：{error}</div>}
 
-          {error === null && entries === null && <div className="dsh-notes__tree-msg">载入中…</div>}
+          {error === null && entries === null && slow && (
+            <div className="dsh-notes__tree-msg">载入中…</div>
+          )}
 
           {error === null && entries !== null && entries.length === 0 && (
             <div className="dsh-notes__tree-msg">空的文件夹</div>
