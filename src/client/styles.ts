@@ -184,6 +184,118 @@ const CSS = `
   color: var(--dsw-alias-label-secondary);
 }
 
+/* ---------------- 文件名搜索 ---------------- */
+/* 夹在置顶区与文件树之间。下拉用绝对定位浮在树上方，不挤动树的布局。 */
+.dsh-notes__search {
+  position: relative;
+  padding: 6px 10px 2px;
+  flex: 0 0 auto;
+}
+.dsh-notes__search-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 7px;
+  background: var(--dsw-alias-bg-overlay);
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-notes__search-field:focus-within {
+  border-color: var(--dsw-alias-brand-primary);
+}
+.dsh-notes__search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+}
+.dsh-notes__search-input::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-notes__search-clear {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+.dsh-notes__search-clear:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-notes__search-list {
+  position: absolute;
+  z-index: 20;
+  left: 10px;
+  right: 10px;
+  top: 34px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-elevated);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+.dsh-notes__search-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.dsh-notes__search-item--on {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+.dsh-notes__search-ic {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-notes__search-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dsh-notes__search-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+}
+.dsh-notes__search-tip {
+  padding: 8px 6px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11.5px;
+  text-align: center;
+}
+
 /* ---------------- 文件树 ---------------- */
 /* 文件树的标题行：左边是分组名，右边是可见范围开关。
    放在这里而不是顶部工具栏，是因为它管的就是「这棵树显示什么」。 */

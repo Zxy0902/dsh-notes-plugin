@@ -11,7 +11,7 @@ import { FileTypeIcon, SegmentedControl } from '@deepseek-ai/dsh-client-ui-primi
 import { MarkdownText, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives';
 import { NotesApi, NotesApiError, type DirEntry } from './api';
 import { MAX_PINNED, NotesStore, type FileVisibility, type NoteTab, type PinLayout } from './store';
-import { ancestorsOf, listAllDirectories } from './treeOps';
+import { ancestorsOf, filterFiles, listAllDirectories, listAllFiles, type FileHit } from './treeOps';
 import { useScrollSync } from './useScrollSync';
 import { BREAKPOINTS, useElementWidth } from './useElementWidth';
 
@@ -59,6 +59,16 @@ function IconClose({ size = 10 }: { size?: number }): JSX.Element {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} strokeWidth={1.9} aria-hidden="true">
       <path d="M4 4l8 8M12 4l-8 8" />
+    </svg>
+  );
+}
+
+/** 放大镜。 */
+function IconSearch({ size = 13 }: { size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} aria-hidden="true">
+      <circle cx="7" cy="7" r="4.2" />
+      <path d="M10.2 10.2 13.6 13.6" />
     </svg>
   );
 }
@@ -692,6 +702,199 @@ interface SidebarProps {
   onNotice: (message: string) => void;
 }
 
+/** 文件名搜索框的属性。 */
+interface FileSearchProps {
+  api: NotesApi;
+  root: string;
+  /** 文件树刷新令牌：变化时让缓存失效（新建/删除/外部改动后都要重新收集）。 */
+  treeRevision: number;
+  /** 选中一个文件：调用处负责展开祖先、定位并打开。 */
+  onPick: (path: string) => void;
+}
+
+/** 搜索最多展示多少条命中。 */
+const SEARCH_LIMIT = 30;
+/** 全量文件清单最多收集多少个（超出部分搜不到，给出提示）。 */
+const SEARCH_SCAN_LIMIT = 5000;
+
+/**
+ * 置顶区下方的文件名搜索。
+ *
+ * 交互：输入即在下拉里列出**当前根目录下**文件名匹配的文件，上下键移动、回车或
+ * 点击选中 —— 选中后由调用处展开树并打开阅读区。
+ *
+ * 性能取舍：文件树本身是懒加载的（只列已展开的目录），搜索需要全量清单，
+ * 所以在**首次聚焦时**整棵遍历一次并缓存在内存里，之后每次输入只在本地过滤，
+ * 不再打宿主；`treeRevision` 变化（文件增删、外部改动）时缓存失效，下次聚焦重拉。
+ */
+function FileSearch(props: FileSearchProps): JSX.Element {
+  const { api, root, treeRevision, onPick } = props;
+
+  const [query, setQuery] = useState('');
+  const [files, setFiles] = useState<readonly FileHit[] | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [truncated, setTruncated] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [cursor, setCursor] = useState(0);
+
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  /** 已缓存清单对应的 treeRevision；不一致就说明缓存过期了。 */
+  const cachedFor = useRef<number | null>(null);
+
+  // 换了根或树变了，缓存作废。
+  useEffect(() => {
+    cachedFor.current = null;
+    setFiles(null);
+  }, [root, treeRevision]);
+
+  /** 需要时把全量清单拉回来（只拉一次）。 */
+  const ensureFiles = useCallback(async (): Promise<void> => {
+    if (files !== null && cachedFor.current === treeRevision) return;
+    if (scanning) return;
+    setScanning(true);
+    try {
+      const result = await listAllFiles(api, root, SEARCH_SCAN_LIMIT);
+      setFiles(result.files);
+      setTruncated(result.truncated);
+      cachedFor.current = treeRevision;
+    } catch {
+      setFiles([]);
+    } finally {
+      setScanning(false);
+    }
+  }, [api, root, treeRevision, files, scanning]);
+
+  const hits = useMemo(
+    () => (files === null ? [] : filterFiles(files, query, SEARCH_LIMIT)),
+    [files, query],
+  );
+
+  // 命中变化后把光标拉回首行，避免停在已不存在的下标上。
+  useEffect(() => {
+    setCursor(0);
+  }, [query]);
+
+  // 点外部收起下拉。
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (event: MouseEvent) => {
+      const box = boxRef.current;
+      if (box !== null && !box.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  /** 选中一条命中。 */
+  const pick = useCallback(
+    (hit: FileHit) => {
+      setOpen(false);
+      setQuery('');
+      onPick(hit.path);
+    },
+    [onPick],
+  );
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape') {
+      setOpen(false);
+      setQuery('');
+      return;
+    }
+    if (hits.length === 0) return;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setCursor((n) => (n + 1) % hits.length);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setCursor((n) => (n - 1 + hits.length) % hits.length);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      const hit = hits[cursor];
+      if (hit !== undefined) pick(hit);
+    }
+  };
+
+  const showList = open && query.trim() !== '';
+
+  return (
+    <div className="dsh-notes__search" ref={boxRef}>
+      <div className="dsh-notes__search-field">
+        <IconSearch size={13} />
+        <input
+          type="text"
+          className="dsh-notes__search-input"
+          placeholder="搜索文件名"
+          aria-label="搜索文件名"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setOpen(true);
+            void ensureFiles();
+          }}
+          onFocus={() => {
+            setOpen(true);
+            void ensureFiles();
+          }}
+          onKeyDown={onKeyDown}
+        />
+        {query !== '' && (
+          <button
+            type="button"
+            className="dsh-notes__search-clear"
+            title="清空"
+            aria-label="清空搜索"
+            onClick={() => {
+              setQuery('');
+              setOpen(false);
+            }}
+          >
+            <IconClose size={10} />
+          </button>
+        )}
+      </div>
+
+      {showList && (
+        <div className="dsh-notes__search-list" role="listbox" aria-label="搜索结果">
+          {scanning && hits.length === 0 && (
+            <div className="dsh-notes__search-tip">读取文件清单…</div>
+          )}
+          {!scanning && hits.length === 0 && (
+            <div className="dsh-notes__search-tip">没有匹配的文件</div>
+          )}
+          {hits.map((hit, index) => (
+            <button
+              key={hit.path}
+              type="button"
+              role="option"
+              aria-selected={index === cursor}
+              className={`dsh-notes__search-item${index === cursor ? ' dsh-notes__search-item--on' : ''}`}
+              title={hit.path}
+              // 用 mousedown 而不是 click：避免输入框先失焦导致候选被收起。
+              onMouseDown={(event) => {
+                event.preventDefault();
+                pick(hit);
+              }}
+              onMouseEnter={() => setCursor(index)}
+            >
+              <span className="dsh-notes__search-ic">
+                <FileTypeIcon path={hit.name} size={13} />
+              </span>
+              <span className="dsh-notes__search-name">{hit.name}</span>
+              {hit.dir !== '' && <span className="dsh-notes__search-dir">{hit.dir}</span>}
+            </button>
+          ))}
+          {truncated && (
+            <div className="dsh-notes__search-tip">
+              文件太多，只索引了前 {SEARCH_SCAN_LIMIT} 个
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** 左侧：切换文件夹按钮、置顶区、文件树。 */
 function NotesSidebar(props: SidebarProps): JSX.Element {
   const { root, pinned, expanded, activePath } = props;
@@ -762,6 +965,26 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
       props.onNotice('当前树里找不到这个文件：可能被「可编辑」范围的过滤隐藏了');
     }
   }, [props, activePath, expanded, scrollToPath]);
+
+  /**
+   * 展开所有祖先目录并打开文件（搜索结果点选用）。
+   *
+   * 路径来自搜索的扁平清单，没有 DirEntry 对象，所以这里按路径推导文件名。
+   */
+  const openFromSearch = useCallback(
+    (path: string): void => {
+      if (props.root === null) return;
+      const ancestors = ancestorsOf(path, props.root);
+      if (ancestors.length > 0) {
+        props.store.setExpanded([...props.expanded, ...ancestors]);
+      }
+      const name = basenameOf(path);
+      props.onOpenFile({ name, path, kind: 'file', editable: true });
+      // 树里滚过去高亮一下：让用户知道文件在哪一层。
+      void scrollToPath(path);
+    },
+    [props, scrollToPath],
+  );
 
   /**
    * 全部展开：逐层列出所有目录后整体展开。
@@ -1033,6 +1256,15 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
           </div>
         )}
       </div>
+
+      {/* 文件名搜索：夹在置顶区与文件树之间。放在这里是因为它服务的是「找到那个文件」，
+          和树是同一件事的两种入口（树靠翻层级，搜索靠直接打名字）。 */}
+      <FileSearch
+        api={props.api}
+        root={props.root ?? ''}
+        treeRevision={props.treeRevision}
+        onPick={openFromSearch}
+      />
 
       {/* 文件树：根目录按「文件夹 / 根目录文件」分组。
           可见范围开关放在这一行（置顶区下方、文件树标题旁）：

@@ -9,6 +9,8 @@
 export interface TreeEntryLike {
   kind: string;
   path: string;
+  /** 文件/目录名（不含路径）。老接口可能没有，缺失时用 path 的末段兜底。 */
+  name?: string;
 }
 
 /** 树逻辑需要的 API 面。 */
@@ -107,4 +109,107 @@ export async function listAllDirectories(
   }
 
   return { dirs, truncated };
+}
+
+/** 搜索命中的文件。 */
+export interface FileHit {
+  /** 完整路径。 */
+  path: string;
+  /** 文件名（不含目录）。 */
+  name: string;
+  /** 相对根目录的目录部分，用于在下拉里显示位置；根目录下的文件为空串。 */
+  dir: string;
+}
+
+/** 取路径最后一段（同时识别 `/` 与 `\`）。 */
+function baseNameOfLike(path: string): string {
+  const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  return cut < 0 ? path : path.slice(cut + 1);
+}
+
+/**
+ * 广度优先列出 root 下所有文件（文件名搜索用）。
+ *
+ * 与 `listAllDirectories` 同一套遍历方式：逐层列目录、读不到的跳过。
+ * 搜索需要的是**全量文件清单**，一次性拉完缓存在内存里，之后输入只做本地过滤，
+ * 不会每敲一个字就打一次宿主。
+ *
+ * @param api - 笔记 API（只需要 list）。
+ * @param root - 笔记根目录。
+ * @param limit - 最多收集多少个文件；超出即停止并标记 truncated。
+ * @returns 文件清单与被截断标记。
+ */
+export async function listAllFiles(
+  api: TreeApiLike,
+  root: string,
+  limit: number,
+): Promise<{ files: FileHit[]; truncated: boolean }> {
+  const files: FileHit[] = [];
+  const queue: string[] = [root];
+  let truncated = false;
+
+  while (queue.length > 0) {
+    const dir = queue.shift() as string;
+    let listing: { entries: readonly TreeEntryLike[] };
+    try {
+      listing = await api.list(root, dir);
+    } catch {
+      continue;
+    }
+
+    for (const entry of listing.entries) {
+      if (entry.kind === 'directory') {
+        queue.push(entry.path);
+        continue;
+      }
+      if (entry.kind !== 'file') continue;
+      if (files.length >= limit) {
+        truncated = true;
+        break;
+      }
+      const name = entry.name ?? baseNameOfLike(entry.path);
+      // 相对目录：去掉 root 前缀与紧随的分隔符。
+      const rel = entry.path.startsWith(root) ? entry.path.slice(root.length) : entry.path;
+      const trimmed = rel.replace(/^[\\/]+/, '');
+      const dirPart = trimmed.length > name.length ? trimmed.slice(0, trimmed.length - name.length - 1) : '';
+      files.push({ path: entry.path, name, dir: dirPart });
+    }
+
+    if (truncated) break;
+  }
+
+  return { files, truncated };
+}
+
+/**
+ * 按文件名过滤（不区分大小写，包含匹配）。
+ *
+ * 几条刻意的取舍：
+ * - **只匹配文件名，不匹配路径**：输入 `readme` 应该命中所有 README，
+ *   而不是把 `readme-archive/` 下的每个文件都列出来。
+ * - **空查询返回空数组**：没有输入时不展示「全部文件」，那既慢又没用。
+ * - **完全匹配排最前，其次前缀匹配，再次包含匹配**：同名文件在深层目录时，
+ *   用户多半想的是那个「就叫这个名字」的。
+ *
+ * @param files - 全量文件清单（来自 listAllFiles）。
+ * @param query - 用户输入。
+ * @param limit - 最多返回多少条。
+ * @returns 排序后的命中列表。
+ */
+export function filterFiles(files: readonly FileHit[], query: string, limit: number): FileHit[] {
+  const needle = query.trim().toLowerCase();
+  if (needle === '') return [];
+
+  const scored: Array<{ hit: FileHit; score: number }> = [];
+  for (const file of files) {
+    const name = file.name.toLowerCase();
+    const at = name.indexOf(needle);
+    if (at < 0) continue;
+    // 0 = 完全同名，1 = 前缀，2 = 中间包含。
+    const score = name === needle ? 0 : at === 0 ? 1 : 2;
+    scored.push({ hit: file, score });
+  }
+
+  scored.sort((a, b) => a.score - b.score || a.hit.name.length - b.hit.name.length || a.hit.path.localeCompare(b.hit.path));
+  return scored.slice(0, limit).map((item) => item.hit);
 }
