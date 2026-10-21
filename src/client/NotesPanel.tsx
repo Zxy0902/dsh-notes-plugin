@@ -213,6 +213,21 @@ const VIEW_MODE_OPTIONS = [
   { value: 'preview' as const, label: '预览' },
 ];
 
+/**
+ * 一个 tab 打开时应该用哪种显示方式。
+ *
+ * 非 Markdown（txt、外部文件、技能页）永远走编辑态：它们没有渲染概念，
+ * 记下来的偏好不该影响它们。
+ *
+ * @param tab - 要打开的 tab。
+ * @param store - 状态仓库，读 `mdViewMode` 偏好。
+ * @returns 初始显示方式。
+ */
+function defaultViewModeFor(tab: NoteTab, store: NotesStore): ViewMode {
+  if (tab.kind !== 'md') return 'edit';
+  return store.getSnapshot().mdViewMode;
+}
+
 // ---------------------------------------------------------------------------
 // 面板组件
 // ---------------------------------------------------------------------------
@@ -1787,21 +1802,6 @@ function NotesSidebar(props: SidebarProps): JSX.Element {
           {props.fileVisibility === 'all' ? '全部' : '可编辑'}
         </button>
 
-        {/* 技能入口：与文件树并列、但语义独立。
-            技能散落在 ~/.dsh/skills、项目 .dsh/skills 等好几个目录里，不属于
-            「用户选中的这个文件夹」，所以不做成树节点（那会让树错乱），而是
-            一个通往独立目录页的按钮。它读的是 DSH 官方 skill 注册表。 */}
-        {props.onOpenSkills !== undefined && (
-          <button
-            type="button"
-            className="dsh-notes__treebtn dsh-notes__treebtn--skill"
-            title="查看技能（skill）的说明与正文"
-            aria-label="查看技能"
-            onClick={props.onOpenSkills}
-          >
-            <IconSkill />
-          </button>
-        )}
       </div>
 
       {/* 树容器本身也是放置目标：拖到树的空白处 = 移回根目录。
@@ -2835,11 +2835,31 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
 
   /**
    * Markdown 的显示方式。txt 没有渲染概念，永远是 edit，不受此状态影响。
-   * - split：左编辑 + 右预览（原来唯一的行为）
+   * - split：左编辑 + 右预览
    * - edit：只显示编辑框
    * - preview：只显示渲染结果，不渲染编辑框 —— 纯阅读时最省空间也最干净
+   *
+   * 初值取**用户记住的默认值**（`store.state.mdViewMode`），而不是写死的 split：
+   * 习惯只读的人每次打开 md 都要手动切一下，很烦。
+   * 这个初值**不使用** useState 的惰性初始化之外的任何同步逻辑 —— 用户在本
+   * 面板里切换时走 `chooseView`，那里会同时更新偏好；而「打开另一个文件」时
+   * EditorPane 会重新挂载（key 是 tab.id），因此自然读到最新的偏好。
    */
-  const [viewMode, setViewMode] = useState<ViewMode>('split');
+  const [viewMode, setViewMode] = useState<ViewMode>(() => defaultViewModeFor(tab, store));
+
+  /**
+   * 切换显示方式，并把它记成默认。
+   *
+   * 只在**手动切换**时记录：那是用户明确表达的偏好。打开文件时按偏好初始化
+   * 不算，否则「split 被初始化成 split」也会写一次盘。
+   */
+  const chooseView = useCallback(
+    (next: ViewMode) => {
+      setViewMode(next);
+      store.setMdViewMode(next);
+    },
+    [store],
+  );
 
   /** 只有分栏时才需要同步滚动。 */
   const sync = useScrollSync(tab.kind === 'md' && viewMode === 'split' && syncScroll, rememberScroll);
@@ -2988,7 +3008,9 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
             id={`notes-view-${tab.id}`}
             value={viewMode}
             options={VIEW_MODE_OPTIONS}
-            onChange={setViewMode}
+            // 走 chooseView 而不是裸 setViewMode：切换的同时记住为默认，
+            // 下次打开任何 md 都从这一种开始。
+            onChange={chooseView}
             label="显示方式"
             className="dsh-notes__segmented"
           />

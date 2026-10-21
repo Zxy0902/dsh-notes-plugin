@@ -64,6 +64,12 @@ export interface NotesState {
    */
   fileVisibility: FileVisibility;
   /**
+   * 打开 Markdown 文件时的默认展示方式（分栏 / 编辑 / 阅读）。
+   *
+   * 与 `fileVisibility` 一样是全局偏好：立刻落盘，下一次打开 md 沿用。
+   */
+  mdViewMode: MdViewMode;
+  /**
    * 置顶区排版：`one` 单栏（每项一行，文件名完整可读）或 `two` 双栏（省空间）。
    * 默认 `two`（与历史行为一致）。
    */
@@ -86,6 +92,18 @@ export const MAX_PINNED = 6;
 /** 文件树可见范围。 */
 export type FileVisibility = 'editable' | 'all';
 
+/**
+ * 打开 Markdown 文件时的默认展示方式。
+ *
+ * - `split`：左编辑 + 右预览（历史行为，默认值保持不变）
+ * - `edit`：只显示编辑器
+ * - `preview`：只显示渲染结果
+ *
+ * 这是**跨文件的全局偏好**：用户选了「阅读」之后，下次打开任何 md 都还是阅读。
+ * 与「当前这个 tab 临时切一下」是两件事 —— 后者不落盘，见面板里的 viewMode。
+ */
+export type MdViewMode = 'split' | 'edit' | 'preview';
+
 /** 置顶区排版。 */
 export type PinLayout = 'one' | 'two';
 
@@ -104,6 +122,7 @@ function emptyState(): NotesState {
     scroll: {},
     drafts: {},
     fileVisibility: 'editable',
+    mdViewMode: 'split',
     pinLayout: 'two',
     treeRevision: 0,
   };
@@ -172,6 +191,9 @@ function reviveState(raw: unknown): NotesState {
     drafts,
     // 旧版本数据没有这个字段，回落到默认值，不影响已有用户的记忆。
     fileVisibility: input.fileVisibility === 'all' ? 'all' : 'editable',
+    // 旧数据没有这个字段：回落到 split，与历史行为一致。
+    mdViewMode:
+      input.mdViewMode === 'edit' ? 'edit' : input.mdViewMode === 'preview' ? 'preview' : 'split',
     pinLayout: input.pinLayout === 'one' ? 'one' : 'two',
     treeRevision: 0,
   };
@@ -344,6 +366,16 @@ export class NotesStore {
   setFileVisibility(mode: FileVisibility): void {
     if (this.state.fileVisibility === mode) return;
     this.commit({ ...this.state, fileVisibility: mode }, true);
+  }
+
+  /**
+   * 记住 Markdown 的默认展示方式。
+   *
+   * 立即落盘：这是用户的显式偏好，下次打开 md 沿用，不能因为 400ms 内刷新而丢。
+   */
+  setMdViewMode(mode: MdViewMode): void {
+    if (this.state.mdViewMode === mode) return;
+    this.commit({ ...this.state, mdViewMode: mode }, true);
   }
 
   /**

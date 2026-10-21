@@ -1095,8 +1095,6 @@ const CSS = `
 /* 引导页的两个按钮并排（选择文件夹 / 看技能）。 */
 .dsh-notes__emptyactions { display: flex; align-items: center; gap: 8px; }
 /* 技能按钮与树操作按钮之间有明显分界：它通向另一个页面，不是树的开关。 */
-.dsh-notes__treebtn--skill { margin-left: auto; }
-.dsh-notes__treebtn--skill:hover:not(:disabled) { color: var(--dsw-alias-brand-primary); }
 
 /* ---------------- 空状态 ---------------- */
 .dsh-notes__empty {
