@@ -1095,6 +1095,41 @@ function resolveInsideRoot(rawPath: string, rawRoot: string): { target: string; 
   return { target, root };
 }
 
+/**
+ * 判断 `target` 是否落在某个允许的根之内。
+ *
+ * 与 `resolveInsideRoot` 的区别：这里是**一组根**而不是一个。用于「已打开的
+ * 文件」——用户的 tab 与置顶可能来自之前选过的其他文件夹，切根之后它们仍然
+ * 应当能读能存，否则切一下文件夹，之前打开的标签就全变成打不开了。
+ *
+ * @param rawPath - 目标绝对路径。
+ * @param rawRoots - 允许的根（至少一个）。
+ * @returns 规范化后的目标与命中的根（与 `resolveInsideRoot` 同形，便于互换）。
+ * @throws HttpError 路径非法或不在任何根之内。
+ */
+function resolveInsideAnyRoot(
+  rawPath: string,
+  rawRoots: readonly string[],
+): { target: string; root: string } {
+  if (typeof rawPath !== 'string' || rawPath.trim() === '') {
+    throw new HttpError(400, 'path is required');
+  }
+  if (!isAbsolute(rawPath) || rawPath.includes('\0')) {
+    throw new HttpError(400, 'invalid path');
+  }
+  const target = normalize(resolve(rawPath));
+
+  for (const rawRoot of rawRoots) {
+    if (typeof rawRoot !== 'string' || rawRoot.trim() === '') continue;
+    if (!isAbsolute(rawRoot) || rawRoot.includes('\0')) continue;
+    const root = normalize(resolve(rawRoot));
+    if (target === root || target.startsWith(root.endsWith(sep) ? root : root + sep)) {
+      return { target, root };
+    }
+  }
+  throw new HttpError(403, 'path is outside the selected root');
+}
+
 /** 带 HTTP 状态码的错误。 */
 class HttpError extends Error {
   constructor(
@@ -1567,6 +1602,24 @@ export function makeRoutes(
     }
   };
 
+  /**
+   * 取一个可重复的查询参数（`?roots=a&roots=b`，也接受逗号分隔）。
+   *
+   * 用于把「已打开文件所属的根」随请求带上来。空值与空串一律忽略。
+   */
+  const queryList = (req: RouteRequest, key: string): string[] => {
+    try {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      return url.searchParams
+        .getAll(key)
+        .flatMap((value) => value.split(','))
+        .map((value) => value.trim())
+        .filter((value) => value !== '');
+    } catch {
+      return [];
+    }
+  };
+
   return [
     // ---- 列出目录：文件树的一次展开 ----
     {
@@ -1605,7 +1658,11 @@ export function makeRoutes(
           if (path === undefined || root === undefined) {
             throw new HttpError(400, 'expected ?path=<abs>&root=<abs>');
           }
-          const { target } = resolveInsideRoot(path, root);
+          // `roots` 是「已被打开过的文件所属的根」：切过文件夹之后，旧 tab 与
+          // 置顶仍然要能读。客户端把它的根一起报上来，这里只把它们当成**额外的
+          // 允许范围**，不会扩大成「任意路径可读」。
+          const extraRoots = queryList(req, 'roots');
+          const { target } = resolveInsideAnyRoot(path, [root, ...extraRoots]);
 
           const info = await stat(target);
           if (!info.isFile()) throw new HttpError(400, 'not a regular file');
@@ -1638,17 +1695,21 @@ export function makeRoutes(
           const body = await readJsonBody(req, limit + 64 * 1024);
           if (body === null) throw new HttpError(400, 'invalid JSON body');
 
-          const { path, root, content } = body as {
+          const { path, root, content, roots } = body as {
             path?: unknown;
             root?: unknown;
             content?: unknown;
+            /** 额外的允许根（已打开文件所属的文件夹）。 */
+            roots?: unknown;
           };
           if (typeof content !== 'string') throw new HttpError(400, 'content must be a string');
           if (Buffer.byteLength(content, 'utf8') > limit) {
             throw new HttpError(413, `content exceeds ${limit} bytes`);
           }
 
-          const { target } = resolveInsideRoot(String(path ?? ''), String(root ?? ''));
+          // 与 read 同一套规则：额外根只来自「已打开的文件」，用于切根后仍能保存。
+          const extraRoots = Array.isArray(roots) ? roots.filter((r): r is string => typeof r === 'string') : [];
+          const { target } = resolveInsideAnyRoot(String(path ?? ''), [String(root ?? ''), ...extraRoots]);
 
           const info = await stat(target);
           if (!info.isFile()) throw new HttpError(400, 'not a regular file');

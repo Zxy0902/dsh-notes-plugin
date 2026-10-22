@@ -441,9 +441,10 @@ export function NotesPanel({
         entry.name.toLowerCase().endsWith('.md') || entry.name.toLowerCase().endsWith('.markdown')
           ? 'md'
           : 'txt';
-      store.openTab({ id: entry.path, name: entry.name, path: entry.path, kind });
+      // 记下它是从哪个根打开的：切到别的文件夹后，这个 tab 仍要能读能存。
+      store.openTab({ id: entry.path, name: entry.name, path: entry.path, kind, root: state.root ?? undefined });
     },
-    [store],
+    [store, state.root],
   );
 
   /**
@@ -703,7 +704,8 @@ export function NotesPanel({
       const name = basenameOf(path);
       const lower = name.toLowerCase();
       const kind: 'md' | 'txt' = lower.endsWith('.md') || lower.endsWith('.markdown') ? 'md' : 'txt';
-      store.openTab({ id: path, name, path, kind });
+      // 置顶可能是切根之前放上去的，所以不能直接用当前根 —— 先问它属于哪个根。
+      store.openTab({ id: path, name, path, kind, root: store.rootForPinned(path) || undefined });
     },
     [store],
   );
@@ -2799,7 +2801,13 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
     setLoading(true);
     // 技能文件走专用只读接口：它不需要根目录，因此在技能 tab 里，
     // 用户当前的笔记文件夹与历史完全不受影响。
-    const request = isSkillFile(tab.path) ? api.readSkillFile(tab.path) : api.read(root, tab.path);
+    //
+    // 普通文件用 **tab 自己的根**，不是当前根：切过文件夹之后，旧 tab 的文件
+    // 落在别的根下。同时把「其他已打开文件的根」一并报给宿主，让它知道这些
+    // 也是允许范围（否则宿主会按单个根围栏拒绝）。
+    const request = isSkillFile(tab.path)
+      ? api.readSkillFile(tab.path)
+      : api.read(tab.root ?? root, tab.path, store.knownRoots());
     request
       .then((file) => {
         if (!alive) return;
@@ -2896,7 +2904,8 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
         props.onNotice('技能文件是只读的，不能保存修改');
         return;
       }
-      await api.write(root, tab.path, content);
+      // 与读同一套规则：用 tab 自己的根，并把其他已打开文件的根一并报上去。
+      await api.write(tab.root ?? root, tab.path, content, store.knownRoots());
       // 先更新基线，再清草稿：否则中间那一帧会显示旧内容。
       setLoaded(content);
       store.clearDraft(tab.id);

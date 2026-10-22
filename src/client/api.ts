@@ -147,13 +147,45 @@ export class NotesApi {
   }
 
   /** 读取一个文件。 */
-  read(root: string, path: string): Promise<FileContent> {
-    return this.request(`${API.read}?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}`);
+  /**
+   * 读一个文件。
+   *
+   * @param root - 这个文件所属的根（**不是**当前浏览的根：切过文件夹之后两者可能不同）。
+   * @param path - 文件绝对路径。
+   * @param extraRoots - 其他已打开文件所属的根。宿主把它们当作额外允许范围，
+   *   这样切根之后旧 tab 仍然能读。
+   * @returns 文件内容。
+   */
+  read(root: string, path: string, extraRoots: readonly string[] = []): Promise<FileContent> {
+    const extra = extraRoots
+      .filter((item) => item !== '' && item !== root)
+      .map((item) => `&roots=${encodeURIComponent(item)}`)
+      .join('');
+    return this.request(
+      `${API.read}?root=${encodeURIComponent(root)}&path=${encodeURIComponent(path)}${extra}`,
+    );
   }
 
-  /** 覆盖保存一个文件。 */
-  write(root: string, path: string, content: string): Promise<{ ok: true; mtimeMs: number }> {
-    return this.request(API.write, { method: 'POST', body: { root, path, content } });
+  /**
+   * 覆盖保存一个文件。
+   *
+   * @param root - 这个文件所属的根。
+   * @param path - 文件绝对路径。
+   * @param content - 新内容。
+   * @param extraRoots - 其他已打开文件所属的根（与 `read` 同一套规则）。
+   * @returns 写入结果。
+   */
+  write(
+    root: string,
+    path: string,
+    content: string,
+    extraRoots: readonly string[] = [],
+  ): Promise<{ ok: true; mtimeMs: number }> {
+    const roots = extraRoots.filter((item) => item !== '' && item !== root);
+    return this.request(API.write, {
+      method: 'POST',
+      body: roots.length === 0 ? { root, path, content } : { root, path, content, roots },
+    });
   }
 
   /** 在根目录下新建一个文件。 */

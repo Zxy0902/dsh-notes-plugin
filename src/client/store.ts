@@ -29,6 +29,17 @@ export interface NoteTab {
    *   是为了让「看过某个技能、想回到列表」有天然的返回路径：点左边的 tab 即可。
    */
   kind: 'md' | 'txt' | 'external' | 'skills';
+  /**
+   * 打开这个文件时所在的根目录。
+   *
+   * 用途：切到别的文件夹之后，这个 tab 仍然要能读能存。宿主的路由按「根」
+   * 做围栏，只报当前根的话旧 tab 就会被 403 拒绝，所以要把「自己属于哪个根」
+   * 一起带上去。
+   *
+   * 不填（`undefined`）表示不依附任何根：新建的草稿、技能页、技能文件。
+   * 它们的读写各走各的通道，不需要根。
+   */
+  root?: string;
 }
 
 /** 文件夹历史最多保留几个。太多会让下拉变成又一份文件树。 */
@@ -401,6 +412,52 @@ export class NotesStore {
       return;
     }
     this.commit({ ...this.state, tabs: [...this.state.tabs, tab], activeTabId: tab.id }, true);
+  }
+
+  /**
+   * 所有「已打开文件」所属的根目录（去重，不含当前根也不含空值）。
+   *
+   * 切文件夹不会关掉已有的 tab 与置顶，它们的文件因此可能落在别的根下。
+   * 客户端读写这些文件时把这份清单一起报给宿主，宿主只把它们当作**额外的
+   * 允许范围**，围栏本身仍然生效。
+   *
+   * @returns 根目录列表。
+   */
+  knownRoots(): string[] {
+    const roots = new Set<string>();
+    for (const tab of this.state.tabs) {
+      if (tab.root !== undefined && tab.root !== '') roots.add(tab.root);
+    }
+    if (this.state.root !== null) roots.delete(this.state.root);
+    return [...roots];
+  }
+
+  /**
+   * 猜一个已置顶文件属于哪个根。
+   *
+   * 置顶只存路径（为了不破坏已有数据），切根之后要把它打开就得知道它自己
+   * 的根。候选是所有「用过的文件夹」：当前根 + 历史根。取**最长的匹配**，
+   * 因为嵌套目录下更深的那层才是它真正的归属。
+   *
+   * 找不到时退回当前根：那会得到一次 403，与改动前的行为一致，不会更坏。
+   *
+   * @param path - 文件绝对路径。
+   * @returns 该文件应当使用的根。
+   */
+  rootForPinned(path: string): string {
+    const candidates = [
+      ...(this.state.root === null ? [] : [this.state.root]),
+      ...this.state.recentRoots,
+    ].filter((candidate) => candidate !== '');
+
+    let best: string | null = null;
+    for (const candidate of candidates) {
+      const base = candidate.endsWith('/') || candidate.endsWith('\\') ? candidate : candidate + '/';
+      if (path === candidate || path.startsWith(base)) {
+        if (best === null || candidate.length > best.length) best = candidate;
+      }
+    }
+    return best ?? this.state.root ?? '';
   }
 
   /** 关闭一个 tab：同时丢弃它的草稿与滚动记忆。 */
