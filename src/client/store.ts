@@ -81,6 +81,13 @@ export interface NotesState {
    */
   mdViewMode: MdViewMode;
   /**
+   * 大纲栏是否展开。
+   *
+   * 也是全局偏好而不是每个 tab 一份：读者对「要不要看目录」的习惯是稳定的，
+   * 而且 EditorPane 每个 tab 一个实例，不记住的话切一次 tab 就得重开一次。
+   */
+  outlineOpen: boolean;
+  /**
    * 置顶区排版：`one` 单栏（每项一行，文件名完整可读）或 `two` 双栏（省空间）。
    * 默认 `two`（与历史行为一致）。
    */
@@ -134,6 +141,7 @@ function emptyState(): NotesState {
     drafts: {},
     fileVisibility: 'editable',
     mdViewMode: 'split',
+    outlineOpen: true,
     pinLayout: 'two',
     treeRevision: 0,
   };
@@ -205,6 +213,8 @@ function reviveState(raw: unknown): NotesState {
     // 旧数据没有这个字段：回落到 split，与历史行为一致。
     mdViewMode:
       input.mdViewMode === 'edit' ? 'edit' : input.mdViewMode === 'preview' ? 'preview' : 'split',
+    // 旧数据没有这个字段：默认展开（大多数人第一次就想要目录）。
+    outlineOpen: input.outlineOpen !== false,
     pinLayout: input.pinLayout === 'one' ? 'one' : 'two',
     treeRevision: 0,
   };
@@ -387,6 +397,16 @@ export class NotesStore {
   setMdViewMode(mode: MdViewMode): void {
     if (this.state.mdViewMode === mode) return;
     this.commit({ ...this.state, mdViewMode: mode }, true);
+  }
+
+  /**
+   * 展开 / 收起大纲栏。
+   *
+   * 立即落盘：这是显式偏好，下次打开应当保持。
+   */
+  setOutlineOpen(open: boolean): void {
+    if (this.state.outlineOpen === open) return;
+    this.commit({ ...this.state, outlineOpen: open }, true);
   }
 
   /**

@@ -1,6 +1,6 @@
 {
   "name": "dsh-client-ui-notes",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "DSH 笔记插件：主面板阅读器 + 备忘录，支持 Markdown 左编右渲、txt 编辑、文件树与置顶。",
   "type": "module",
   "main": "lib/index.js",

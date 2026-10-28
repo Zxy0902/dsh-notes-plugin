@@ -14,6 +14,7 @@ import { MAX_PINNED, NotesStore, type FileVisibility, type NoteTab, type PinLayo
 import { ancestorsOf, filterFiles, listAllDirectories, listAllFiles, type FileHit } from './treeOps';
 import { useScrollSync } from './useScrollSync';
 import { BREAKPOINTS, useElementWidth } from './useElementWidth';
+import { useOutline, OutlinePane } from './OutlinePane';
 
 // ---------------------------------------------------------------------------
 // 小图标（内联 SVG，避免外部资源）
@@ -750,6 +751,12 @@ export function NotesPanel({
          不影响 DSH 其他区域。 */
       data-window-drag-recall=""
     >
+      {/* 窗口最上沿那条 14px 留白单独做成拖拽带。
+         DSH 的 frame 自己不声明拖拽区（见 ui-web 文档：每个 chrome 行自己标
+         data-window-drag），主面板里的页面谁占住窗口顶部，谁就得把那条标出来。
+         本面板此前只留白不标，鼠标落在窗口最上沿按下时没有任何元素认领拖拽，
+         整个窗口就拖不动了。这条带子只在本平台出现，别处 display:none。 */}
+      <div className="dsh-notes__dragband" data-window-drag="" aria-hidden="true" />
       {/* 窄容器下收起文件夹栏，避免左侧固定宽度把编辑区挤没 */}
       {!narrow && (
         <NotesSidebar
@@ -2359,7 +2366,10 @@ function TabStrip(props: TabStripProps): JSX.Element {
   const closeList = useCallback(() => setListOpen(false), []);
 
   return (
-    <div className="dsh-notes__tabsbar">
+    // 整条标签栏都是 chrome：空白处按住可拖整窗。栏里的标签、按钮命中
+    // base.css 的 :is(button, [role=button], [tabindex] …) 规则自动 no-drag，
+    // 点击和标签拖动重排都不受影响。
+    <div className="dsh-notes__tabsbar" data-window-drag="">
       {/* 真正滚动的标签区。左右两侧的箭头是它的兄弟节点，不随内容滚走。 */}
       <div className={`dsh-notes__tabs${dragId !== null ? ' dsh-notes__tabs--reordering' : ''}`} ref={(node) => {
         scrollerRef.current = node;
@@ -2878,6 +2888,28 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
   /** 是否显示渲染结果。 */
   const showPreview = tab.kind === 'md' && viewMode !== 'edit';
 
+  // ---- 大纲 ----
+  /**
+   * 是否提取大纲。
+   *
+   * **只跟「有没有预览」有关，不跟大纲开没开有关** —— 这点很关键：
+   * 若把「已收起」也算进禁用条件，items 会变空，dochead 上的按钮就会因为
+   * 「没有标题」而消失，用户再也打不开它。
+   */
+  const outlineAvailable = tab.kind === 'md' && showPreview;
+  const outline = useOutline(sync.previewRef, text, outlineAvailable);
+  /** 有没有正文标题可列。 */
+  const hasOutline = outlineAvailable && outline.items.length > 0;
+  /**
+   * 最终是否渲染大纲栏。
+   *
+   * **故意不按窗口宽度做门槛。** 早先的版本会在窗口不够宽时把按钮一起隐藏，
+   * 结果是：用户根本看不到这个功能存在，以为没做。开关不该有「看不见」的状态 ——
+   * 挤不挤让用户自己判断，他随时可以收起。宽度只由 CSS 兜底（见
+   * `.dsh-notes__outline` 的 flex 收缩规则）。
+   */
+  const showOutline = hasOutline && store.getSnapshot().outlineOpen;
+
   // 恢复上次的滚动位置（编辑器为主，恢复后再把预览对齐过去）。
   useEffect(() => {
     const node = draftRef.current;
@@ -3011,6 +3043,20 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
           </button>
         )}
 
+        {/* 大纲开关：只要有正文标题就出现。
+            放在显示方式选择器左边 —— 那个选择器位置必须稳定，不能被挤动。 */}
+        {hasOutline && (
+          <button
+            type="button"
+            className={`dsh-notes__btn dsh-notes__btn--outline${showOutline ? ' dsh-notes__btn--on' : ''}`}
+            onClick={() => store.setOutlineOpen(!store.getSnapshot().outlineOpen)}
+            title={showOutline ? '收起大纲' : '展开大纲'}
+            aria-pressed={showOutline}
+          >
+            大纲
+          </button>
+        )}
+
         {/* 显示方式：仅 markdown 需要（txt 没有渲染概念）。固定在最右端。 */}
         {tab.kind === 'md' && (
           <SegmentedControl
@@ -3049,6 +3095,16 @@ function EditorPane(props: EditorPaneProps): JSX.Element {
               <MarkdownText text={text} labels={MARKDOWN_LABELS} variant="body" />
             </div>
           </div>
+        )}
+
+        {/* 大纲栏：常驻在内容区最右。它不参与滚动同步 —— 自己是一列导航，
+            滚动的是里面的列表，与正文位置无关。 */}
+        {showOutline && (
+          <OutlinePane
+            items={outline.items}
+            activeIndex={outline.activeIndex}
+            onJump={outline.jumpTo}
+          />
         )}
       </div>
     </>

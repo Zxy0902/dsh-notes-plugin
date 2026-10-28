@@ -52,6 +52,27 @@ const CSS = `
   color: var(--dsw-alias-label-primary);
   font-size: 13px;
   overflow: hidden;
+  /* dragband 靠绝对定位铺在这条 padding 带里 */
+  position: relative;
+}
+
+/* 窗口最上沿的拖拽带。
+   macOS 上 DSH 的 frame 自己不声明拖拽区，而是让每个 chrome 行自己标
+   data-window-drag（ui-web base.css 把它变成 -webkit-app-region: drag）。
+   主面板顶部的这 14px 留白原本没有任何元素认领，鼠标落在这里按下时窗口
+   拖不动 —— 这条带子就是来认领它的。高度跟顶部基线同源，改基线自动跟随。
+   只在 darwin 出现：其他平台没有拖拽语义，留着只是个看不见的遮挡层。 */
+.dsh-notes__dragband {
+  display: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--dsh-notes-top-band);
+  z-index: 2;
+}
+html[data-platform='darwin'] .dsh-notes__dragband {
+  display: block;
 }
 
 /* ---------------- 左侧：文件夹栏 ----------------
@@ -707,6 +728,115 @@ const CSS = `
 
 /* 单栏模式（仅编辑 / 仅预览）：唯一的面板占满宽度，不留分栏边线 */
 .dsh-notes__body--single .dsh-notes__pane { flex: 1 1 auto; }
+
+/* ---------------- 大纲栏 ----------------
+   常驻内容区最右，216px。与正文区用左边线 + 浅底区分开：
+   它是「导航」而不是「内容」，视觉上必须退后一层。 */
+
+.dsh-notes__outline {
+  flex: 0 0 216px;
+  width: 216px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+  overflow: hidden;
+}
+
+.dsh-notes__outline-head {
+  flex: 0 0 auto;
+  padding: 9px 10px 7px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  letter-spacing: 0.04em;
+}
+
+.dsh-notes__outline-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 4px 0 12px;
+  list-style: none;
+  overflow-y: auto;
+  /* 滚到大纲底部时不要把滚动传给正文，否则读者会莫名其妙地跟着跳 */
+  overscroll-behavior: contain;
+}
+
+.dsh-notes__outline-item {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  /* 左侧 2px 是层级指示线的位置；实际左内边距由行内 style 按层级覆盖 */
+  padding: 4px 10px 4px 8px;
+  border: none;
+  border-left: 2px solid transparent;
+  background: none;
+  color: var(--dsw-alias-label-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 17px;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* 标题文本单独套一层做两行截断。
+   不直接写在 button 上：button 的匿名内容框在 Chromium 下对 line-clamp
+   支持不稳，套 span 才靠得住。单行 216px 只够十来个汉字，中文标题常被
+   切成半句话；两行基本够用，且不依赖悬停（触控板/慢速鼠标都别扭）。 */
+.dsh-notes__outline-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  white-space: normal;
+  overflow: hidden;
+  /* 折行优先在词间断，长英文串/URL 允许硬断，避免撑出边界 */
+  overflow-wrap: anywhere;
+}
+.dsh-notes__outline-item:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-notes__outline-item:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+/* 当前阅读位置：左侧色条 + 提亮，位置一眼可见 */
+.dsh-notes__outline-item--active {
+  border-left-color: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-label-primary);
+  font-weight: 500;
+}
+
+/* 层级用字号递进表达，缩进交给行内 style（每级 10px） */
+.dsh-notes__outline-item[data-level='1'] {
+  color: var(--dsw-alias-label-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.dsh-notes__outline-item[data-level='4'],
+.dsh-notes__outline-item[data-level='5'],
+.dsh-notes__outline-item[data-level='6'] {
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 极窄容器（<560px）下大纲整块不出现 —— 连按钮一起。
+   注意：这是唯一的「看不见」情况，只在窗口窄到正文本身都难读时发生；
+   正常宽度下按钮一定在，不会被宽度悄悄藏掉。 */
+.dsh-notes--narrow .dsh-notes__outline,
+.dsh-notes--narrow .dsh-notes__btn--outline {
+  display: none;
+}
+
+/* 文档头里「大纲」按钮的开启态 */
+.dsh-notes__btn--on {
+  border-color: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-brand-primary);
+}
 
 /* 显示方式切换器：压缩到与旁边按钮一致的高度，别把工具栏撑高 */
 .dsh-notes__segmented { flex: 0 0 auto; }

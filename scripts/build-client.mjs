@@ -24,6 +24,10 @@ const MODULES = [
   'lib/client/treeOps.js',
   'lib/client/useScrollSync.js',
   'lib/client/useElementWidth.js',
+  // 大纲：纯逻辑与 UI 拆成两个模块，都要登记 —— 漏登记就是运行时
+  // `__mod_Outline is not defined`（这个坑踩过两次了）。
+  'lib/client/Outline.js',
+  'lib/client/OutlinePane.js',
   'lib/client/NotesPanel.js',
   // 插件页里的配置面板：不登记的话打包产物里没有它，
   // 运行时 `__mod_ConfigCard is not defined`（与 UpdateAction 同一个坑）。

@@ -214,7 +214,27 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
   const subject = props.subject;
   const pkg = subject?.pkg;
   const manager = props.manager ?? null;
-  const installed = typeof pkg?.version === 'string' ? pkg.version : null;
+
+  /**
+   * 本次会话里我们**亲手装成**的版本。
+   *
+   * 为什么需要它：`pkg.version` 是 DSH 插件页那份包快照，只有它自己的 store
+   * 刷新才会变；本控件是通过 `remote.pluginManager.installBundle` 装的，拿不到
+   * 那个 store，也没有公开的刷新入口。于是升级成功后 `pkg.version` 仍是旧值，
+   * `check()` 一比较又判定「有新版本」，按钮继续可点 —— 再点一次必然撞上
+   * 宿主的 `already-installed`。
+   *
+   * 我们比页面更清楚「这次装成了什么」：`change.application === 'applied'`
+   * 就是权威信号。用它覆盖掉可能过期的 `pkg.version`，界面立刻自洽。
+   *
+   * 失效边界很自然：重新进入页面时组件会重新挂载，这里归零，回到以
+   * `pkg.version` 为准 —— 那时 DSH 的快照已经刷新过了。
+   */
+  const [appliedVersion, setAppliedVersion] = useState<string | null>(null);
+
+  const pageVersion = typeof pkg?.version === 'string' ? pkg.version : null;
+  /** 当前实际安装的版本：本次会话装成过就以它为准，否则以页面快照为准。 */
+  const installed = appliedVersion ?? pageVersion;
 
   const [phase, setPhase] = useState<Phase>({ name: 'idle' });
   /** 是否本地链接安装（探测失败按否处理）。 */
@@ -254,7 +274,9 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
         setPhase({ name: 'error', message: errorText(error, '检查更新失败') });
       }
     },
-    [props, installed],
+    // `installed` 是 `appliedVersion ?? pageVersion` 的派生值，把它俩都列出来，
+    // 让「本次装成过的版本」一变，check 就拿到新值。
+    [props, installed, appliedVersion, pageVersion],
   );
 
   const runUpdate = useCallback(
@@ -287,6 +309,10 @@ export function NotesUpdateAction(props: UpdateActionProps): JSX.Element | null 
         const change = answer.value;
         const blocked = (change?.pendingBuilds?.length ?? 0) > 0;
         if (change?.application === 'applied' || change?.application === 'restart-required') {
+          // 记下「已经装上的是这个版本」：`check()` 之后用它比较，
+          // 而不是用 DSH 页面那份可能还没刷新的 `pkg.version`。
+          // 否则升级成功后按钮仍显示可升级，再点一次会撞上 already-installed。
+          setAppliedVersion(version);
           setPhase({
             name: 'done',
             version,
