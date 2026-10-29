@@ -554,7 +554,210 @@ export interface SkillListing {
 }
 
 // ---------------------------------------------------------------------------
-// 技能目录扫描（宿主平面）
+// 技能目录树（宿主平面）
+// ---------------------------------------------------------------------------
+
+/** 技能目录里的一条：子目录或文件。 */
+export interface SkillTreeNode {
+  /** 文件名（含扩展名）。 */
+  name: string;
+  /** 绝对路径，可直接交给 `read-skill-file`。 */
+  path: string;
+  /** 相对技能目录的路径（用 `/` 分隔），界面用它判断层级与提示。 */
+  rel: string;
+  /** 层级：1 表示技能目录的直接子项。 */
+  depth: number;
+  kind: 'directory' | 'file';
+  /** 文件字节数（目录没有）。 */
+  size?: number;
+  /** 是否还会继续展开（目录；文件恒为 false）。 */
+  hasChildren?: boolean;
+}
+
+/** 技能目录树接口的返回。 */
+export interface SkillTree {
+  /** 技能目录绝对路径。 */
+  path: string;
+  /** 该目录下是否有 SKILL.md（false 说明这条不是目录包技能）。 */
+  hasSkillMd: boolean;
+  /** 直接子项（已排序；未越界的目录按「浅层优先」继续展开）。 */
+  entries: SkillTreeNode[];
+  /**
+   * 没有展开的目录绝对路径。
+   *
+   * 界面据此显示「还有更深的内容」——技能里常见 `scripts/lib/` 这种多层结构，
+   * 但绝大多数时候用户只看第一层。这里如实列出「没读完的目录」，而不是让界面
+   * 去猜截断发生在哪。
+   */
+  collapsed: string[];
+  /** 展开是否被上限截断（为 true 时界面提示「只显示了前 N 项」）。 */
+  truncated: boolean;
+}
+
+/**
+ * 技能文件树的最大深度（技能目录算第 0 层，`rules/a.md` 是深度 2）。
+ *
+ * 技能包一般两三层就到底了；`skill-creator` 这类带 `scripts/`、`assets/`、
+ * `eval-viewer/` 的也就是三四层。留到 6 层足够，同时天然砍掉异常深的目录。
+ */
+const SKILL_TREE_MAX_DEPTH = 6;
+
+/**
+ * 技能文件树最多列多少条。
+ *
+ * 一次请求的产物要塞进一个 JSON 响应，而 `assets/` 里放几十张图是常态。
+ * 300 条既能装下真实技能，又不至于让响应体失控；超过就截断并告诉界面。
+ */
+const SKILL_TREE_LIMIT = 300;
+
+/**
+ * 技能目录里**不展示**的名字。
+ *
+ * 与笔记文件树（`isHiddenEntry`）的取舍略有不同：那里隐藏一切点开头的条目，
+ * 因为笔记目录里 `.git`、`.obsidian` 这类元数据只会干扰阅读。技能目录则常常
+ * 有 `.db-check.json` 这种「作者自己核对用的脚本产物」，同样没有阅读价值。
+ *
+ * 注意只是不展示：真要读（例如从历史 tab 里）仍然读得到。
+ */
+function isHiddenSkillEntry(name: string): boolean {
+  return name.startsWith('.') || name === 'node_modules';
+}
+
+/**
+ * 列出一个技能目录下的文件。
+ *
+ * 为什么要有这条路由：技能常常是**按需加载**的 —— `SKILL.md` 里写着「遇到 X
+ * 就读 `rules/x.md`」，正文被拆进 `rules/`、`references/`、`scripts/` 等子目录。
+ * 只给 SKILL.md 一个文件时，读者根本不知道还有哪些配套文件，更打不开。
+ *
+ * 三个安全约束：
+ * 1. 围栏复用 `insideAnyRoot`，根是一组技能根目录 —— 与 `read-skill-file` 同源，
+ *    两处松紧一致；
+ * 2. **不跟随符号链接**（`withFileTypes` 给的是 lstat 语义，`isDirectory()` 对
+ *    符号链接为 false），所以链接不会把遍历带出技能目录，也不会成环；
+ * 3. 深度与条数都有上限，异常目录不会拖垮请求。
+ *
+ * @param dir - 技能目录绝对路径。
+ * @param roots - 允许的技能根目录（已规范化的绝对路径）。
+ * @returns 技能目录树。
+ * @throws HttpError 路径非法、越界或不是目录。
+ */
+export async function listSkillTree(dir: string, roots: readonly string[]): Promise<SkillTree> {
+  if (typeof dir !== 'string' || dir.trim() === '') throw new HttpError(400, 'path is required');
+  if (!isAbsolute(dir) || dir.includes('\0')) throw new HttpError(400, 'invalid path');
+
+  const root = insideAnyRoot(normalize(resolve(dir)), roots);
+  if (root === null) throw new HttpError(403, 'path is outside the skill roots');
+
+  const base = normalize(resolve(dir));
+  const info = await stat(base);
+  if (!info.isDirectory()) throw new HttpError(400, 'not a directory');
+
+  let hasSkillMd = false;
+  try {
+    hasSkillMd = (await stat(join(base, 'SKILL.md'))).isFile();
+  } catch {
+    // 没有 SKILL.md 不是错误：调用方据此决定是否提示「这不是目录包技能」。
+  }
+
+  const entries: SkillTreeNode[] = [];
+  /** 因深度上限而没有继续展开的目录。 */
+  const deepDirs: string[] = [];
+  let truncated = false;
+
+  /** 列一层（广度优先的一步），返回下一层要展开的目录。 */
+  const walk = async (current: string, depth: number): Promise<string[]> => {
+    let children;
+    try {
+      children = await readdir(current, { withFileTypes: true });
+    } catch {
+      return []; // 读不到就当空目录，不影响其余。
+    }
+
+    const next: string[] = [];
+    // 目录在前、同级按自然序忽略大小写，与笔记文件树的排序一致。
+    const sorted = children
+      .filter((child) => !isHiddenSkillEntry(child.name))
+      .sort((a, b) => {
+        const da = a.isDirectory() ? 0 : 1;
+        const db = b.isDirectory() ? 0 : 1;
+        if (da !== db) return da - db;
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      });
+
+    for (const child of sorted) {
+      if (entries.length >= SKILL_TREE_LIMIT) {
+        truncated = true;
+        return next;
+      }
+      const full = join(current, child.name);
+      const rel = full.slice(base.length + 1).split(sep).join('/');
+
+      if (child.isDirectory()) {
+        // 到深度上限的目录仍然列出来（用户要知道它存在），只是不再往里读。
+        const expandable = depth < SKILL_TREE_MAX_DEPTH;
+        entries.push({
+          name: child.name,
+          path: full,
+          rel,
+          depth,
+          kind: 'directory',
+          hasChildren: expandable,
+        });
+        if (expandable) next.push(full);
+        else deepDirs.push(full);
+        continue;
+      }
+      if (!child.isFile()) continue; // 符号链接等一律不跟随，避免越界与成环。
+
+      let size: number | undefined;
+      try {
+        const fileInfo = await stat(full);
+        size = fileInfo.size;
+      } catch {
+        // 读不到大小不影响列出。
+      }
+      entries.push({
+        name: child.name,
+        path: full,
+        rel,
+        depth,
+        kind: 'file',
+        ...(size === undefined ? {} : { size }),
+      });
+    }
+    return next;
+  };
+
+  // 广度优先：先铺满第一层，再逐层深入 —— 一旦触到上限，被截掉的是深层而不是
+  // 用户最先要看的那几层。
+  let frontier = await walk(base, 1);
+  let depth = 2;
+  while (frontier.length > 0 && !truncated && depth <= SKILL_TREE_MAX_DEPTH) {
+    const next: string[] = [];
+    for (const dirPath of frontier) {
+      if (entries.length >= SKILL_TREE_LIMIT) {
+        truncated = true;
+        break;
+      }
+      next.push(...(await walk(dirPath, depth)));
+    }
+    frontier = next;
+    depth += 1;
+  }
+
+  return {
+    path: base,
+    hasSkillMd,
+    entries,
+    // 只报「存在但没读进去」的目录：深度到顶的，加上因上限被整批跳过的。
+    collapsed: [...deepDirs, ...(truncated ? frontier : [])],
+    truncated,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 技能根目录扫描
 // ---------------------------------------------------------------------------
 
 /**
@@ -1096,6 +1299,30 @@ function resolveInsideRoot(rawPath: string, rawRoot: string): { target: string; 
 }
 
 /**
+ * 判断 `target` 是否落在任意一个根之内（路径围栏的唯一实现）。
+ *
+ * 三处需要「一组根」的地方都走这里，避免各写一遍导致松紧不一：
+ * 1. 已打开的文件（`read` / `write` 的 `roots` 参数）；
+ * 2. 技能目录树（`skill-tree`，根是一组技能根目录）；
+ * 3. 技能文件的直接读取（`read-skill-file`）。
+ *
+ * @param target - 已规范化的目标绝对路径。
+ * @param rawRoots - 允许的根目录（绝对路径，可含空值）。
+ * @returns 命中的规范化根目录；都不命中时返回 null。
+ */
+function insideAnyRoot(target: string, rawRoots: readonly string[]): string | null {
+  for (const rawRoot of rawRoots) {
+    if (typeof rawRoot !== 'string' || rawRoot.trim() === '') continue;
+    if (!isAbsolute(rawRoot) || rawRoot.includes('\0')) continue;
+    const root = normalize(resolve(rawRoot));
+    if (target === root || target.startsWith(root.endsWith(sep) ? root : root + sep)) {
+      return root;
+    }
+  }
+  return null;
+}
+
+/**
  * 判断 `target` 是否落在某个允许的根之内。
  *
  * 与 `resolveInsideRoot` 的区别：这里是**一组根**而不是一个。用于「已打开的
@@ -1119,15 +1346,9 @@ function resolveInsideAnyRoot(
   }
   const target = normalize(resolve(rawPath));
 
-  for (const rawRoot of rawRoots) {
-    if (typeof rawRoot !== 'string' || rawRoot.trim() === '') continue;
-    if (!isAbsolute(rawRoot) || rawRoot.includes('\0')) continue;
-    const root = normalize(resolve(rawRoot));
-    if (target === root || target.startsWith(root.endsWith(sep) ? root : root + sep)) {
-      return { target, root };
-    }
-  }
-  throw new HttpError(403, 'path is outside the selected root');
+  const hit = insideAnyRoot(target, rawRoots);
+  if (hit === null) throw new HttpError(403, 'path is outside the selected root');
+  return { target, root: hit };
 }
 
 /** 带 HTTP 状态码的错误。 */
@@ -1401,6 +1622,7 @@ export const ROUTES = {
   skills: '/api/dsh-notes/skills',
   skillContent: '/api/dsh-notes/skill-content',
   readSkillFile: '/api/dsh-notes/read-skill-file',
+  skillTree: '/api/dsh-notes/skill-tree',
   config: '/api/dsh-notes/config',
 } as const;
 
@@ -2036,12 +2258,12 @@ export function makeRoutes(
           // 技能位置（以及配置里追加的），其余一律 403。
           const cwd = await resolveSessionCwd(sessionRegistryNow());
           const roots = await skillRootsFor(cwd, skillRoots());
+          const rootPaths = roots.map((root) => resolve(root.path));
           const target = resolve(raw);
-          const inside = roots.some((root) => {
-            const base = resolve(root.path);
-            return target === base || target.startsWith(base.endsWith(sep) ? base : base + sep);
-          });
-          if (!inside) throw new HttpError(403, 'path is outside the skill roots');
+          // 围栏与技能目录树共用一份实现，两处松紧必然一致。
+          if (insideAnyRoot(normalize(target), rootPaths) === null) {
+            throw new HttpError(403, 'path is outside the skill roots');
+          }
 
           const info = await stat(target);
           if (!info.isFile()) throw new HttpError(400, 'not a regular file');
@@ -2054,6 +2276,34 @@ export function makeRoutes(
             size: info.size,
             mtimeMs: info.mtimeMs,
           });
+        } catch (error) {
+          fail(res, error);
+        }
+      },
+    },
+
+    // ---- 列一个技能目录下的文件（技能常把正文拆进 rules/、references/ 等子目录）----
+    {
+      kind: 'exact',
+      path: ROUTES.skillTree,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'GET')) return;
+        if (!skillsReading()) {
+          writeJson(res, 404, { error: '技能阅读已在插件配置中关闭' });
+          return;
+        }
+        try {
+          const raw = query(req, 'path');
+          if (raw === undefined || raw === '') throw new HttpError(400, 'expected ?path=<abs>');
+
+          // 同 read-skill-file：没有用户选的根可用，围栏是「必须在技能根之内」。
+          const cwd = await resolveSessionCwd(sessionRegistryNow());
+          const roots = await skillRootsFor(cwd, skillRoots());
+          const tree = await listSkillTree(
+            raw,
+            roots.map((root) => resolve(root.path)),
+          );
+          writeJson(res, 200, tree);
         } catch (error) {
           fail(res, error);
         }

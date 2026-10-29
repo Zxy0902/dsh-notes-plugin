@@ -1133,6 +1133,260 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   border-color: var(--dsw-alias-border-l1);
   background: var(--dsw-alias-interactive-bg-hover);
 }
+
+/* ---------------- 技能列表行 ----------------
+   一行一个按钮：图标 + 名字/说明。点整行 = 读 SKILL.md，并把左侧换成该技能的
+   文件夹树。
+   不在行内展开文件树 —— 技能常把正文拆进多个子目录，塞在这一行里会把列表
+   撑得很长；左侧那一栏本来就是「文件导航」的位置。 */
+.dsh-notes__skillrow { display: flex; flex-direction: column; }
+
+/* ---------------- 左侧：技能文件夹栏 ----------------
+   浏览技能时，左侧整块换成这条技能的文件树。
+   它替换的是笔记文件树的位置 —— 同一个位置、同样的宽度，用户不用重新建立
+   空间感；切走就自动变回笔记目录。 */
+.dsh-notes__skillpane-left {
+  width: 248px;
+  flex: 0 0 248px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0 10px 10px 0;
+  /* 与笔记栏一致：折叠会话栏时给交通灯让位 */
+  margin-top: var(--dsh-notes-sidebar-extra);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  overflow: hidden;
+}
+
+.dsh-notes__skillleft-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+.dsh-notes__skillleft-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.dsh-notes__skillleft-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.dsh-notes__skillleft-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 4px 12px;
+  overscroll-behavior: contain;
+}
+
+/* ---------------- 技能详情页 ----------------
+   头部一行（返回 / 技能名 / 内容·文件切页 / 关闭）+ 内容区。
+   列表与详情共用「技能」这个 tab，所以详情不需要自己的 tab 位。 */
+.dsh-notes__skilldetail {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dsh-notes__sd-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+}
+
+.dsh-notes__sd-back {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  /* 带文字时给点横向内边距；比纯图标好认，也更像「退出」而不是「翻页」 */
+  min-width: 26px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+.dsh-notes__sd-back:hover {
+  border-color: var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-notes__sd-back:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+
+/* 返回按钮上的文字：小一号，别抢技能名的位置 */
+.dsh-notes__sd-backtext { font-size: 11.5px; line-height: 18px; }
+
+/* 技能名右边的小标签（内置 / 仅手动） */
+.dsh-notes__sd-chip {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 999px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 10.5px;
+  line-height: 16px;
+}
+
+/* 技能名：视觉重心。等宽字体让 /name 与正文里的引用写法一致 */
+.dsh-notes__sd-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+}
+
+
+.dsh-notes__sd-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 20px 40px;
+}
+.dsh-notes__sd-origin {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11.5px;
+  line-height: 18px;
+}
+
+.dsh-notes__sd-fileswitch {
+  padding: 1px 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.dsh-notes__sd-fileswitch:hover {
+  border-color: var(--dsw-alias-brand-primary);
+  color: var(--dsw-alias-brand-primary);
+}
+
+.dsh-notes__sd-treewrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 8px 16px;
+  /* 树滚到底时不要把外层带着滚 */
+  overscroll-behavior: contain;
+}
+
+/* 文件树：缩进全部由行内 padding-left（depth × 14）算，这里只管行样式 */
+.dsh-notes__stree { list-style: none; margin: 0; padding: 0; }
+.dsh-notes__stree-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 左内边距由行内 style 按层级覆盖 */
+  padding: 3px 8px 3px 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 22px;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+.dsh-notes__stree-row:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-notes__stree-row:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -2px;
+}
+.dsh-notes__stree-row--dir { color: var(--dsw-alias-label-primary); font-weight: 500; }
+/* 当前正在阅读的那个文件：左侧色条 + 提亮，与大纲的高亮语言一致 */
+.dsh-notes__stree-row--active {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-brand-primary);
+  font-weight: 500;
+}
+.dsh-notes__stree-caret {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+/* 折叠态箭头朝右，展开态朝下 */
+.dsh-notes__stree-row--dir .dsh-notes__stree-caret svg { transform: rotate(-90deg); transition: transform 120ms ease; }
+.dsh-notes__stree-row--dir[aria-expanded='true'] .dsh-notes__stree-caret svg { transform: none; }
+.dsh-notes__stree-row svg { flex: 0 0 auto; }
+.dsh-notes__stree-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 正文读取失败：醒目但不刺眼，读者一眼知道是「没读到」而不是「没有内容」 */
+.dsh-notes__sd-error {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-state-error-primary);
+  border-radius: 8px;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.dsh-notes__sd-treetip {
+  padding: 10px 20px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11.5px;
+  line-height: 20px;
+}
+
+/* 内联技能正文（详情页内容切页）的排版：与阅读器预览一致 */
+.dsh-notes__sd-md { max-width: 760px; }
+
 .dsh-notes__skillicon {
   flex: 0 0 auto;
   display: grid;
@@ -1175,6 +1429,12 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+/* 收起态只给一行，展开态才把完整介绍铺到下面。
+   两处都显示全文等于说两遍 —— 列表里那一行只是「这条技能大概是什么」。 */
+.dsh-notes__skillrow:not(.dsh-notes__skillrow--open) .dsh-notes__skilldesc {
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
 }
 .dsh-notes__skillfoot {
   margin-top: 10px;

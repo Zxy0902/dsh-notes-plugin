@@ -21,6 +21,7 @@ export const API = {
   skills: 'api/dsh-notes/skills',
   skillContent: 'api/dsh-notes/skill-content',
   readSkillFile: 'api/dsh-notes/read-skill-file',
+  skillTree: 'api/dsh-notes/skill-tree',
 } as const;
 
 /** 宿主能力探测结果。 */
@@ -75,6 +76,34 @@ export interface FileContent {
   content: string;
   size: number;
   mtimeMs: number;
+}
+
+/** 技能目录里的一条：子目录或文件（字段与宿主 `SkillTreeNode` 对齐）。 */
+export interface SkillTreeNode {
+  name: string;
+  /** 绝对路径，可直接交给 `readSkillFile`。 */
+  path: string;
+  /** 相对技能目录的路径（`/` 分隔），用来算层级。 */
+  rel: string;
+  /** 层级：1 是技能目录的直接子项。 */
+  depth: number;
+  kind: 'directory' | 'file';
+  size?: number;
+  /** 目录是否还有更深的内容；文件恒为 false。 */
+  hasChildren?: boolean;
+}
+
+/** 技能目录树的读取结果（字段与宿主 `SkillTree` 对齐）。 */
+export interface SkillTree {
+  path: string;
+  /** 该目录下是否有 SKILL.md。 */
+  hasSkillMd: boolean;
+  /** 文件清单（宿主已做浅层优先展开与排序）。 */
+  entries: SkillTreeNode[];
+  /** 存在但没读进去的目录（深度或条数到顶）。 */
+  collapsed: string[];
+  /** 是否因上限被截断。 */
+  truncated: boolean;
 }
 
 /** 一条技能的摘要（字段与宿主 `SkillSummary` 对齐）。 */
@@ -246,6 +275,22 @@ export class NotesApi {
    */
   readSkillFile(path: string): Promise<FileContent> {
     return this.request(`${API.readSkillFile}?path=${encodeURIComponent(path)}`);
+  }
+
+  /**
+   * 列出一个技能目录下的文件。
+   *
+   * 技能的正文经常不在 SKILL.md 里，而是拆进 `rules/`、`references/` 等子目录、
+   * 由 SKILL.md 按需引用。只给 SKILL.md 一个文件时，读者根本不知道还有哪些
+   * 配套文件 —— 这条路由就是为了把技能目录整个摊开。
+   *
+   * 围栏与 `readSkillFile` 一致：只允许技能根目录之内的路径。
+   *
+   * @param path - 技能目录绝对路径（`SKILL.md` 所在目录）。
+   * @returns 该目录下的文件清单（宿主已按浅层优先展开，带截断标记）。
+   */
+  skillTree(path: string): Promise<SkillTree> {
+    return this.request(`${API.skillTree}?path=${encodeURIComponent(path)}`);
   }
 
   /** 读取宿主能力（目前用于判断本平台是否支持删除）。 */

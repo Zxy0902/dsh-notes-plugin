@@ -28,6 +28,21 @@ const MODULES = [
   // `__mod_Outline is not defined`（这个坑踩过两次了）。
   'lib/client/Outline.js',
   'lib/client/OutlinePane.js',
+  // 共用的小工具：路径/错误文案、内联 SVG 图标。
+  // 被下面几乎所有组件引用，必须排在最前。
+  'lib/client/paths.js',
+  'lib/client/icons.js',
+  // 按功能拆开的界面块，顺序即依赖顺序（被依赖者在前）：
+  // Dialogs → TabStrip / Panes 都用它；EditorPane、Sidebar 相对独立；
+  // 技能三件套（列表 / 正文 / 左侧树）互相不引用，但都被 NotesPanel 引用。
+  'lib/client/Dialogs.js',
+  'lib/client/TabStrip.js',
+  'lib/client/Panes.js',
+  'lib/client/EditorPane.js',
+  'lib/client/Sidebar.js',
+  'lib/client/SkillListPane.js',
+  'lib/client/SkillPanes.js',
+  'lib/client/SkillTreePane.js',
   'lib/client/NotesPanel.js',
   // 插件页里的配置面板：不登记的话打包产物里没有它，
   // 运行时 `__mod_ConfigCard is not defined`（与 UpdateAction 同一个坑）。
