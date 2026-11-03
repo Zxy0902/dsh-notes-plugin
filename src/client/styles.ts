@@ -121,8 +121,6 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl;
-  text-align: left;
   color: var(--dsw-alias-label-primary);
   font-weight: 500;
 }
@@ -689,8 +687,6 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl;
-  text-align: left;
   font-family: var(--dsh-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 10.5px;
 }
@@ -1009,16 +1005,21 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   border-left-color: var(--dsw-alias-brand-primary);
   background: color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent);
 }
-/* 刚添加的标签：实心品牌色，比旁边的描边标签更显眼（它是要被看到的那一个）。 */
+/* 「刚添加」标签。
+   【为什么不用品牌色实心底】踩过一次：品牌色（dsw-alias-brand-primary）与它
+   的 invert 变体在部分主题下是同一个值，且品牌色本身可能是
+   dsw-alias-label-primary（前景文字色）—— 拿文字色当背景就是黑底黑字。
+   改成官方 badge 的稳妥画法：浅色层底 + 细边框 + label token 文字。
+   强调感由「整行浅底 + 左边框」承担，标签只负责说清事实。 */
 .dsh-notes__agenttag-new {
   padding: 0 5px;
+  border: 1px solid var(--dsw-alias-brand-primary);
   border-radius: 999px;
-  background: var(--dsw-alias-brand-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-brand-primary);
   font-size: 10px;
   font-weight: 600;
-  /* 品牌色底上的前景走主题自带的 invert 变体：写死白色在暗色主题下
-     对比度不够（那条品牌色偏亮）。 */
-  color: var(--dsw-alias-brand-primary-invert, #ffffff);
+  line-height: 15px;
 }
 .dsh-notes__agentpick {
   flex: 1;
@@ -1048,8 +1049,6 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  direction: rtl;
-  text-align: left;
 }
 /* 「尚未创建」：用次要色，不要像错误 —— 没建过是正常状态。 */
 .dsh-notes__agenttag-missing {

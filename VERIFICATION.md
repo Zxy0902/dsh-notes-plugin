@@ -48,6 +48,15 @@ health 返回 `ok`、`canDelete` 为布尔、`platform` 等于宿主 `process.pl
   全部按前缀改到新路径
 - `remapPath`：路径前缀不误伤（改 `/root/d` 不影响 `/root/dd/x.md`）
 
+**真实渲染验证（headless Chrome + 从产物提取的真实 CSS）**
+
+上一版出过两个「只在真实渲染里才看得出」的问题，因此这两项改成**看像素**而非读代码：
+- 「刚添加」标签：用真实 CSS + 浅色主题变量渲染，确认**文字可读**、不是黑底黑字
+- 路径方向：`~/.agents/AGENTS.md` 与 `/Users/x/.agents/AGENTS.md` 均**正序**显示
+- 交叉验证 `direction: rtl` 的实际效果：`/Users/x/notes/p` 会显示成
+  `Users/x/notes/p/`（开头的 `/` 被挪到末尾）——这是去掉它的依据
+- 产物里 `direction: rtl` 出现次数为 0
+
 **图标外观一致（构建产物 + 源码断言）**
 
 侧栏「笔记」图标：
