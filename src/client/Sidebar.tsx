@@ -14,7 +14,8 @@ import {
   IconCaret, IconCheck, IconClose, IconFolder, IconLocate, IconPin,
   IconRefresh, IconSearch, IconSkill, IconUnfoldLess, IconUnfoldMore,
 } from './icons';
-import { basenameOf, messageOf } from './paths';
+import { ContextMenu } from './Dialogs';
+import { basenameOf, messageOf, splitName } from './paths';
 import type { FileVisibility, NotesStore, PinLayout } from './store';
 import { ancestorsOf, filterFiles, listAllDirectories, listAllFiles, type FileHit } from './treeOps';
 import { useElementWidth } from './useElementWidth';
@@ -62,6 +63,12 @@ export interface SidebarProps {
   onDragEnd: () => void;
   onDropInto: (destDir: string) => void;
   onContextMenu: (entry: DirEntry, x: number, y: number) => void;
+  /** 提交重命名。 */
+  onRename: (path: string, name: string) => void;
+  /** 放弃重命名（输入框按 Escape 或失焦时）。 */
+  onRenameCancel: () => void;
+  /** 当前正在行内重命名的路径；null 表示没有。 */
+  renamingPath: string | null;
   /** 文件树可见范围。 */
   fileVisibility: FileVisibility;
   onSetFileVisibility: (mode: FileVisibility) => void;
@@ -396,6 +403,9 @@ export function NotesSidebar(props: SidebarProps): JSX.Element {
   /** 文件夹下拉是否展开。 */
   const [folderOpen, setFolderOpen] = useState(false);
 
+  /** 置顶胶囊的右键菜单：目标路径与屏幕坐标。 */
+  const [pinMenu, setPinMenu] = useState<{ path: string; x: number; y: number } | null>(null);
+
   /** 文件树滚动容器：定位时用它把目标节点滚进视野。 */
   const treeRef = useRef<HTMLDivElement | null>(null);
 
@@ -612,10 +622,6 @@ export function NotesSidebar(props: SidebarProps): JSX.Element {
   const onPinMouseDown = (event: React.MouseEvent<HTMLButtonElement>, path: string): void => {
     if (event.button !== 0) return;
     if (pinned.length < 2) return;
-    // 点 × 时不参与拖拽，交给它的点击逻辑。
-    if (event.target instanceof HTMLElement && event.target.closest('.dsh-notes__pin-x') !== null) {
-      return;
-    }
     // 兜底：上一次拖拽若因鼠标在窗口外松开而没收到 mouseup，这里先收尾。
     if (pinDraggingRef.current !== null) endPinDrag(false);
     pressRef.current = { path, x: event.clientX, y: event.clientY };
@@ -710,7 +716,7 @@ export function NotesSidebar(props: SidebarProps): JSX.Element {
 
       {/* 置顶区：数量自适应；标题右侧是单/双栏排版切换 */}
       <div className="dsh-notes__pinned">
-        <div className="dsh-notes__pinned-head">
+        <div className="dsh-notes__pinned-head" title="右键某个置顶项可以取消置顶">
           <IconPin size={11} />
           置顶
           <span className="dsh-notes__pinned-count">
@@ -768,24 +774,22 @@ export function NotesSidebar(props: SidebarProps): JSX.Element {
                   style={order !== undefined ? { order } : undefined}
                   // 排序走指针事件（见 onPinMouseDown 上方说明），不用原生拖拽。
                   onMouseDown={(event) => onPinMouseDown(event, path)}
-                  onClick={(event) => {
+                  onClick={() => {
                     // 刚拖完的那一次 click 丢掉。
                     if (suppressClickRef.current) return;
-                    // 点 × 取消置顶，点其余部分打开。
-                    if ((event.target as HTMLElement).closest('.dsh-notes__pin-x') !== null) {
-                      props.onTogglePin(path);
-                      return;
-                    }
                     props.onOpenPinned(path);
+                  }}
+                  // 取消置顶走右键菜单：胶囊上的 × 太小，误点一下就把文件踢出
+                  // 收藏，用户来不及反应。右键 → 「取消置顶」是有意为之的动作。
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setPinMenu({ path, x: event.clientX, y: event.clientY });
                   }}
                 >
                   <span className="dsh-notes__pin-ic">
                     <FileTypeIcon path={name} size={13} />
                   </span>
                   <span className="dsh-notes__pin-name">{name}</span>
-                  <span className="dsh-notes__pin-x" title="取消置顶">
-                    <IconClose size={9} />
-                  </span>
                   {/* 缝隙指示线：预览里排到最前的卡左缘 = 插到最前；
                       排到最后一张的右缘 = 插到最后 */}
                   {isFirst && <span className="dsh-notes__pin-gap" aria-hidden />}
@@ -915,9 +919,115 @@ export function NotesSidebar(props: SidebarProps): JSX.Element {
           onDragEnd={props.onDragEnd}
           onDropInto={props.onDropInto}
           onContextMenu={props.onContextMenu}
+          renamingPath={props.renamingPath}
+          onRename={props.onRename}
+          onRenameCancel={props.onRenameCancel}
         />
       </div>
+
+      {/* 置顶胶囊的右键菜单：取消置顶是有意为之的动作，不再给一个容易误点的 ×。 */}
+      {pinMenu !== null && (
+        <ContextMenu
+          x={pinMenu.x}
+          y={pinMenu.y}
+          onClose={() => setPinMenu(null)}
+          items={[
+            { label: '打开', onPick: () => props.onOpenPinned(pinMenu.path) },
+            { separator: true },
+            {
+              label: '取消置顶',
+              danger: true,
+              onPick: () => props.onTogglePin(pinMenu.path),
+            },
+          ]}
+        />
+      )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 行内重命名输入框
+// ---------------------------------------------------------------------------
+
+/** 行内重命名输入框的属性。 */
+interface RenameFieldProps {
+  /** 当前的完整文件名（含扩展名）。 */
+  name: string;
+  /** 提交新名字。 */
+  onCommit: (name: string) => void;
+  /** 放弃重命名。 */
+  onCancel: () => void;
+}
+
+/**
+ * 文件树里的行内重命名输入框。
+ *
+ * 【为什么做成行内，而不是弹一个对话框】重命名是个「盯着这一行改一个字」的
+ * 动作：弹窗会把那一行盖住，还得把名字重新敲一遍。行内输入框只改这一行，
+ * 原名还在眼前，改错了立刻能看出来。
+ *
+ * 初始只**选中主干**（扩展名之前那截）：用户直接打字就是改名字，`周会纪要.md`
+ * 变成 `周会2.md`，扩展名不会被顺手打掉。想改扩展名时手动点过去选。
+ *
+ * @param props - 初始名字与两个回调。
+ * @returns 输入框。
+ */
+function RenameField(props: RenameFieldProps): JSX.Element {
+  const [value, setValue] = useState(props.name);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  /** 已经提交或取消过：用来挡住 blur 之后的重复提交。 */
+  const doneRef = useRef(false);
+
+  useEffect(() => {
+    const node = inputRef.current;
+    if (node === null) return;
+    node.focus();
+    // 只选中主干，扩展名留在原地。
+    const { stem } = splitName(props.name);
+    node.setSelectionRange(0, stem.length);
+  }, []);
+
+  /** 提交当前名字。 */
+  const commit = useCallback(() => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    const trimmed = value.trim();
+    if (trimmed === '' || trimmed === props.name) {
+      props.onCancel();
+      return;
+    }
+    props.onCommit(trimmed);
+  }, [props, value]);
+
+  return (
+    <input
+      ref={inputRef}
+      type="text"
+      className="dsh-notes__rename"
+      value={value}
+      spellCheck={false}
+      aria-label="重命名"
+      onChange={(event) => setValue(event.target.value)}
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onMouseDown={(event) => event.stopPropagation()}
+      onDragStart={(event) => event.preventDefault()}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          commit();
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          if (doneRef.current) return;
+          doneRef.current = true;
+          props.onCancel();
+        }
+      }}
+      onBlur={commit}
+    />
   );
 }
 
@@ -951,6 +1061,12 @@ interface TreeNodeProps {
   onDropInto: (destDir: string) => void;
   /** 在条目上右键。 */
   onContextMenu: (entry: DirEntry, x: number, y: number) => void;
+  /** 正在行内重命名的路径；null 表示没有。 */
+  renamingPath: string | null;
+  /** 提交重命名。 */
+  onRename: (path: string, name: string) => void;
+  /** 放弃重命名。 */
+  onRenameCancel: () => void;
   /** 文件树可见范围；`editable` 时隐藏不可阅读的文件。 */
   fileVisibility: FileVisibility;
   /** 用系统默认程序打开一个不可在阅读器内阅读的文件。 */
@@ -1031,6 +1147,22 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
           onKeyDown={(event) => {
             if (event.key === 'Enter' || event.key === ' ') props.store.toggleExpanded(path);
           }}
+          // 目录也能右键：与文件一样弹一个菜单，而不是直接跳进输入态 ——
+          // 右键的通用心智是「弹菜单」。
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            props.onContextMenu(
+              {
+                name: basenameOf(path),
+                path,
+                kind: 'directory',
+                editable: false,
+              },
+              event.clientX,
+              event.clientY,
+            );
+          }}
           // 拖拽经过时高亮；悬停一会儿自动展开，这样能拖进更深的一层。
           onDragOver={(event) => {
             if (props.draggingPath === null) return;
@@ -1066,7 +1198,15 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
           <span style={{ display: 'grid', placeItems: 'center', color: 'var(--dsw-alias-state-warn-primary, #f5a524)' }}>
             <IconFolder />
           </span>
-          <span className="dsh-notes__label">{basenameOf(path)}</span>
+          {props.renamingPath === path ? (
+            <RenameField
+              name={basenameOf(path)}
+              onCommit={(name) => props.onRename(path, name)}
+              onCancel={props.onRenameCancel}
+            />
+          ) : (
+            <span className="dsh-notes__label">{basenameOf(path)}</span>
+          )}
         </div>
       )}
 
@@ -1152,6 +1292,9 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
           onDragEnd={props.onDragEnd}
           onDropInto={props.onDropInto}
           onContextMenu={props.onContextMenu}
+          renamingPath={props.renamingPath}
+          onRename={props.onRename}
+          onRenameCancel={props.onRenameCancel}
           fileVisibility={props.fileVisibility}
           onOpenExternal={props.onOpenExternal}
         />
@@ -1208,7 +1351,15 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
         <span style={{ display: 'grid', placeItems: 'center' }}>
           <FileTypeIcon path={entry.name} size={14} />
         </span>
-        <span className="dsh-notes__label">{entry.name}</span>
+        {props.renamingPath === entry.path ? (
+          <RenameField
+            name={entry.name}
+            onCommit={(name) => props.onRename(entry.path, name)}
+            onCancel={props.onRenameCancel}
+          />
+        ) : (
+          <span className="dsh-notes__label">{entry.name}</span>
+        )}
 
         {/* 置顶只对可阅读文件有意义（置顶项点开是进阅读器） */}
         {readable && (

@@ -9,8 +9,10 @@
  * `NotesPanel` 里时，改技能最容易碰到编辑器。
  */
 import { useCallback, useEffect, useState } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { MarkdownText, SegmentedControl, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { NotesApi } from './api';
+import { indent, outdent } from './indent';
 import { isSkillFile, messageOf } from './paths';
 import type { NoteTab, NotesStore } from './store';
 import { useScrollSync } from './useScrollSync';
@@ -31,6 +33,19 @@ const MARKDOWN_LABELS: MarkdownLabels = {
 export type ViewMode = 'split' | 'edit' | 'preview';
 
 /**
+ * 这个 tab 是不是 Markdown（要左编右渲、有大纲、有显示方式切换）。
+ *
+ * `global` 是 agent 指令文件，内容就是 Markdown，所以按 md 对待 ——
+ * 少一种分支，也让它免费获得预览与大纲。
+ *
+ * @param tab - 要判断的 tab。
+ * @returns 是 Markdown 则为 true。
+ */
+function isMarkdownTab(tab: NoteTab): boolean {
+  return tab.kind === 'md' || tab.kind === 'global';
+}
+
+/**
  * 一个 tab 打开时应该用哪种显示方式。
  *
  * 非 Markdown（txt、外部文件、技能页）永远走编辑态：它们没有渲染概念，
@@ -41,7 +56,15 @@ export type ViewMode = 'split' | 'edit' | 'preview';
  * @returns 初始显示方式。
  */
 function defaultViewModeFor(tab: NoteTab, store: NotesStore): ViewMode {
-  if (tab.kind !== 'md') return 'edit';
+  if (!isMarkdownTab(tab)) return 'edit';
+  /*
+   * agent 指令文件永远从**编辑态**开始。
+   *
+   * 打开它的目的就是改规则；若沿用 md 的默认偏好（可能被设成「预览」），
+   * 用户点进来看到的是只读渲染，还得再切一次才能写。这类文件数量很少、
+   * 打开频率低，「每次都直接给编辑框」比「记住上次的方式」更有用。
+   */
+  if (tab.kind === 'global') return 'split';
   return store.getSnapshot().mdViewMode;
 }
 
@@ -100,12 +123,17 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
     // 技能文件走专用只读接口：它不需要根目录，因此在技能 tab 里，
     // 用户当前的笔记文件夹与历史完全不受影响。
     //
+    // 全局 agent 指令文件也走专用通道（白名单围栏）：它同样不在笔记目录里。
+    //
     // 普通文件用 **tab 自己的根**，不是当前根：切过文件夹之后，旧 tab 的文件
     // 落在别的根下。同时把「其他已打开文件的根」一并报给宿主，让它知道这些
     // 也是允许范围（否则宿主会按单个根围栏拒绝）。
-    const request = isSkillFile(tab.path)
-      ? api.readSkillFile(tab.path)
-      : api.read(tab.root ?? root, tab.path, store.knownRoots());
+    const request =
+      tab.kind === 'global'
+        ? api.readAgentFile(tab.path)
+        : isSkillFile(tab.path)
+          ? api.readSkillFile(tab.path)
+          : api.read(tab.root ?? root, tab.path, store.knownRoots());
     request
       .then((file) => {
         if (!alive) return;
@@ -123,7 +151,7 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
     return () => {
       alive = false;
     };
-  }, [api, root, tab.id, tab.path, store]);
+  }, [api, root, tab.id, tab.path, tab.kind, store]);
 
   /**
    * 记录编辑栏滚动位置，用于「记忆功能」。
@@ -162,19 +190,26 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
   const chooseView = useCallback(
     (next: ViewMode) => {
       setViewMode(next);
-      store.setMdViewMode(next);
+      /*
+       * agent 指令文件**不写入** md 的默认偏好。
+       *
+       * 这个偏好是「打开笔记时默认用哪种方式」；用户为一份 AGENTS.md 临时切到
+       * 预览，不该连带改掉他以后打开所有笔记的习惯。两者是不同意图，
+       * 混在一起会让人莫名其妙地发现「我的笔记怎么变预览了」。
+       */
+      if (tab.kind !== 'global') store.setMdViewMode(next);
     },
-    [store],
+    [store, tab.kind],
   );
 
   /** 只有分栏时才需要同步滚动。 */
-  const sync = useScrollSync(tab.kind === 'md' && viewMode === 'split' && syncScroll, rememberScroll);
+  const sync = useScrollSync(isMarkdownTab(tab) && viewMode === 'split' && syncScroll, rememberScroll);
   const draftRef = sync.editorRef;
 
   /** 是否显示编辑框。 */
-  const showEditor = tab.kind !== 'md' || viewMode !== 'preview';
+  const showEditor = !isMarkdownTab(tab) || viewMode !== 'preview';
   /** 是否显示渲染结果。 */
-  const showPreview = tab.kind === 'md' && viewMode !== 'edit';
+  const showPreview = isMarkdownTab(tab) && viewMode !== 'edit';
 
   // ---- 大纲 ----
   /**
@@ -184,7 +219,7 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
    * 若把「已收起」也算进禁用条件，items 会变空，dochead 上的按钮就会因为
    * 「没有标题」而消失，用户再也打不开它。
    */
-  const outlineAvailable = tab.kind === 'md' && showPreview;
+  const outlineAvailable = isMarkdownTab(tab) && showPreview;
   const outline = useOutline(sync.previewRef, text, outlineAvailable);
   /** 有没有正文标题可列。 */
   const hasOutline = outlineAvailable && outline.items.length > 0;
@@ -220,12 +255,18 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
     setSaving(true);
     try {
       const content = store.getSnapshot().drafts[tab.id] ?? '';
-      if (isSkillFile(tab.path)) {
-        props.onNotice('技能文件是只读的，不能保存修改');
-        return;
+      if (tab.kind === 'global') {
+        // agent 指令文件走专用通道（宿主按「绝对路径 + 文本扩展名」围栏），
+        // 不走笔记那套「根目录之内」的规则 —— 它本来就不在笔记目录里。
+        await api.writeAgentFile(tab.path, content);
+      } else {
+        if (isSkillFile(tab.path)) {
+          props.onNotice('技能文件是只读的，不能保存修改');
+          return;
+        }
+        // 与读同一套规则：用 tab 自己的根，并把其他已打开文件的根一并报上去。
+        await api.write(tab.root ?? root, tab.path, content, store.knownRoots());
       }
-      // 与读同一套规则：用 tab 自己的根，并把其他已打开文件的根一并报上去。
-      await api.write(tab.root ?? root, tab.path, content, store.knownRoots());
       // 先更新基线，再清草稿：否则中间那一帧会显示旧内容。
       setLoaded(content);
       store.clearDraft(tab.id);
@@ -235,7 +276,7 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
     } finally {
       setSaving(false);
     }
-  }, [api, root, tab.id, tab.path, dirty, saving, store, props]);
+  }, [api, root, tab.id, tab.path, tab.kind, dirty, saving, store, props]);
 
   // Cmd/Ctrl+S 保存。
   useEffect(() => {
@@ -260,6 +301,50 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
     },
     [loaded, store, tab.id],
   );
+
+  /**
+   * Tab 键：缩进 / 反缩进，而不是把焦点挪走。
+   *
+   * textarea 里的 Tab 默认是「跳到下一个可聚焦元素」，在面板里表现为按一下
+   * Tab 编辑光标就丢了、DSH 整个界面被抢走焦点。对写 Markdown 的人而言，
+   * Tab 应该是缩进（列表嵌套、代码块）。
+   *
+   * 焦点仍然留在编辑框里 —— 这正是用户要的「在阅读器里面进行 tab 缩进」。
+   *
+   * 逃生口：⌘/Ctrl + Tab 保留浏览器默认的「移动焦点」。偶尔需要跳出编辑框
+   * 去点别处时用它；纯 Tab 则永远是缩进。
+   */
+  const [pendingSelection, setPendingSelection] = useState<{ start: number; end: number } | null>(null);
+
+  const onEditorKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+      if (event.key !== 'Tab') return;
+      // ⌘/Ctrl + Tab：交回默认行为（移动焦点），当作跳出编辑框的出口。
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      // 阻止默认行为：不然后台会先跑一遍「移动焦点」，光标就跑了。
+      event.preventDefault();
+
+      const node = event.currentTarget;
+      const result = event.shiftKey
+        ? outdent(text, node.selectionStart, node.selectionEnd)
+        : indent(text, node.selectionStart, node.selectionEnd);
+
+      if (result.text === text) return;
+      onChange(result.text);
+      // 选区要等 React 把新值写回 DOM 之后再设，否则会被旧值覆盖。
+      setPendingSelection({ start: result.start, end: result.end });
+    },
+    [text, onChange],
+  );
+
+  // 新文本落进 textarea 之后，把选区挪到新位置。
+  useEffect(() => {
+    if (pendingSelection === null) return;
+    const node = draftRef.current;
+    if (node === null) return;
+    node.setSelectionRange(pendingSelection.start, pendingSelection.end);
+    setPendingSelection(null);
+  }, [pendingSelection, text]);
 
   if (error !== null) {
     return (
@@ -305,7 +390,7 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
             所以选择器贴在右端不会因左侧按钮增删而移动。 */}
 
         {/* 同步滚动开关：只在分栏时有意义 */}
-        {tab.kind === 'md' && viewMode === 'split' && (
+        {isMarkdownTab(tab) && viewMode === 'split' && (
           <button
             type="button"
             className="dsh-notes__btn"
@@ -346,7 +431,7 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
         )}
 
         {/* 显示方式：仅 markdown 需要（txt 没有渲染概念）。固定在最右端。 */}
-        {tab.kind === 'md' && (
+        {isMarkdownTab(tab) && (
           <SegmentedControl
             id={`notes-view-${tab.id}`}
             value={viewMode}
@@ -369,8 +454,9 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
               className="dsh-notes__editor"
               value={text}
               spellCheck={false}
-              placeholder={tab.kind === 'md' ? '开始写 Markdown…' : '开始写点什么…'}
+              placeholder={isMarkdownTab(tab) ? '开始写 Markdown…' : '开始写点什么…'}
               onChange={(event) => onChange(event.target.value)}
+              onKeyDown={onEditorKeyDown}
               onScroll={sync.onEditorScroll}
             />
           </div>

@@ -27,8 +27,10 @@ export interface NoteTab {
    * 类型就少一处要同步的分支。技能与笔记的区别只在「怎么打开的」。
    * - `skills` 是技能目录页本身（单例 tab）。把它做成 tab 而不是独立视图，
    *   是为了让「看过某个技能、想回到列表」有天然的返回路径：点左边的 tab 即可。
+   * - `global` 是 DSH 的**全局 agent 指令文件**（`~/.dsh/AGENTS.md` 等）——
+   *   读写走专用的白名单通道，不依附任何根，也不进「技能/笔记」的树。
    */
-  kind: 'md' | 'txt' | 'external' | 'skills';
+  kind: 'md' | 'txt' | 'external' | 'skills' | 'global';
   /**
    * 打开这个文件时所在的根目录。
    *
@@ -93,6 +95,15 @@ export interface NotesState {
    */
   pinLayout: PinLayout;
   /**
+   * 用户自己添加的 agent 指令文件路径（绝对路径，按添加顺序）。
+   *
+   * **DSH 预置的那一条不在这个数组里** —— 它由宿主按 `$DSH_HOME` 算出来、
+   * 每次现取（用户可能改了 home 位置），存下来反而是过期的副本。
+   * 这里只放用户亲手加的，所以它同时也是「授权清单」：
+   * 数组里有这个路径，才认为用户允许读写它。
+   */
+  agentFiles: string[];
+  /**
    * 文件树刷新令牌。
    *
    * 目录内容是存在各树节点自己的 state 里的（懒加载、按展开状态拉取），
@@ -143,6 +154,7 @@ function emptyState(): NotesState {
     mdViewMode: 'split',
     outlineOpen: true,
     pinLayout: 'two',
+    agentFiles: [],
     treeRevision: 0,
   };
 }
@@ -159,10 +171,12 @@ function reviveState(raw: unknown): NotesState {
       if (typeof item !== 'object' || item === null) continue;
       const tab = item as Partial<NoteTab>;
       if (typeof tab.id !== 'string' || typeof tab.name !== 'string') continue;
-      if (tab.kind !== 'md' && tab.kind !== 'txt' && tab.kind !== 'external' && tab.kind !== 'skills') continue;
+      if (tab.kind !== 'md' && tab.kind !== 'txt' && tab.kind !== 'external' && tab.kind !== 'skills' && tab.kind !== 'global') continue;
       const path = typeof tab.path === 'string' ? tab.path : null;
       // external tab 完全以路径为身份，没有路径就无法恢复，直接丢弃。
       if (tab.kind === 'external' && path === null) continue;
+      // global tab 同理：没有路径就没法用白名单通道读写。
+      if (tab.kind === 'global' && path === null) continue;
       tabs.push({ id: tab.id, name: tab.name, path, kind: tab.kind });
     }
   }
@@ -216,6 +230,9 @@ function reviveState(raw: unknown): NotesState {
     // 旧数据没有这个字段：默认展开（大多数人第一次就想要目录）。
     outlineOpen: input.outlineOpen !== false,
     pinLayout: input.pinLayout === 'one' ? 'one' : 'two',
+    agentFiles: Array.isArray(input.agentFiles)
+      ? input.agentFiles.filter((p): p is string => typeof p === 'string' && p !== '')
+      : [],
     treeRevision: 0,
   };
 }
@@ -418,6 +435,41 @@ export class NotesStore {
   setPinLayout(layout: PinLayout): void {
     if (this.state.pinLayout === layout) return;
     this.commit({ ...this.state, pinLayout: layout }, true);
+  }
+
+  // -------------------------------------------------------------------------
+  // agent 指令文件（用户自加的那些）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 添加一个 agent 指令文件路径。
+   *
+   * 只做本地登记 —— 文件是否存在由读的时候判断（不存在就显示「尚未创建」，
+   * 允许用户直接写第一行）。已存在则不重复添加。
+   *
+   * @param path - 绝对路径。
+   */
+  addAgentFile(path: string): void {
+    const trimmed = path.trim();
+    if (trimmed === '') return;
+    if (this.state.agentFiles.includes(trimmed)) return;
+    this.commit({ ...this.state, agentFiles: [...this.state.agentFiles, trimmed] }, true);
+  }
+
+  /**
+   * 从列表里移除一个 agent 指令文件。
+   *
+   * **只删这条记录，不删磁盘上的文件** —— 「我不想在这里看到它」和
+   * 「我要删掉这个文件」是两件事，后者走文件树那边。
+   *
+   * @param path - 绝对路径。
+   */
+  removeAgentFile(path: string): void {
+    if (!this.state.agentFiles.includes(path)) return;
+    this.commit(
+      { ...this.state, agentFiles: this.state.agentFiles.filter((item) => item !== path) },
+      true,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -730,36 +782,78 @@ export class NotesStore {
   }
 
   /**
-   * 文件被移动后，把引用旧路径的地方全部改到新路径。
+   * 文件被移动或重命名后，把引用旧路径的地方全部改到新路径。
    *
    * 涉及四处：已打开的 tab（id/path）、置顶列表、滚动记忆、未保存草稿。
    * 不改的话，那个 tab 再保存就会写回一个不存在的位置，置顶项也会变成死链。
+   *
+   * **目录改名要连带改子树**：目录改了名，里面每个文件的绝对路径都变了。
+   * 所以这里按「路径前缀」匹配，而不是全等匹配 —— 移动一个目录时，
+   * 目录里已打开的文件同样要跟着改。
    *
    * @param from - 移动前的绝对路径。
    * @param to - 移动后的绝对路径。
    */
   remapPath(from: string, to: string): void {
-    const name = basenameOfPath(to);
+    /**
+     * 把一个路径映射到新路径。
+     *
+     * 命中条件：路径正好等于 `from`，或以 `from + 分隔符` 开头（目录子树）。
+     */
+    const remap = (path: string): string => {
+      if (path === from) return to;
+      const prefix = from.endsWith('/') || from.endsWith('\\') ? from : from + '/';
+      const winPrefix = from.endsWith('/') || from.endsWith('\\') ? from : from + '\\';
+      if (path.startsWith(prefix)) return to + path.slice(from.length);
+      if (path.startsWith(winPrefix)) return to + path.slice(from.length);
+      return path;
+    };
 
-    const tabs = this.state.tabs.map((tab) =>
-      tab.id === from || tab.path === from ? { ...tab, id: to, path: to, name } : tab,
-    );
-    const pinned = this.state.pinned.map((p) => (p === from ? to : p));
-    // 只把顶层那条记录改名：from 的子路径（目录内文件）不在这里处理，
-    // 当前也只允许移动文件，不存在子树问题。
-    const scroll = { ...this.state.scroll };
-    if (from in scroll) {
-      scroll[to] = scroll[from];
-      delete scroll[from];
-    }
-    const drafts = { ...this.state.drafts };
-    if (from in drafts) {
-      drafts[to] = drafts[from];
-      delete drafts[from];
-    }
-    const activeTabId = this.state.activeTabId === from ? to : this.state.activeTabId;
+    const tabs = this.state.tabs.map((tab) => {
+      const newId = remap(tab.id);
+      const newPath = tab.path === null ? null : remap(tab.path);
+      if (newId === tab.id && newPath === tab.path) return tab;
+      const name = basenameOfPath(newPath ?? newId);
+      return {
+        ...tab,
+        id: newId,
+        path: newPath,
+        // 文件名跟着路径走：目录改名时，里面的文件名不变，但顶层那条要改。
+        name,
+        // 改了扩展名就要换编辑方式：`a.md` 改成 `a.txt` 之后不该再走
+        // 左编右渲。只在 md/txt 之间换 —— external（阅读器打不开的文件）
+        // 不由扩展名决定，保持原样。
+        kind: tab.kind === 'md' || tab.kind === 'txt' ? kindForName(name) : tab.kind,
+      };
+    });
+    const pinned = this.state.pinned.map((p) => remap(p));
 
-    this.commit({ ...this.state, tabs, pinned, scroll, drafts, activeTabId }, true);
+    /**
+     * 把记忆数据（滚动位置、草稿）里的键整体搬家。
+     *
+     * 键是 tab id（就是路径），所以键与值都要按同一套规则改。
+     */
+    const remapRecord = (record: Record<string, string>): Record<string, string> => {
+      const next: Record<string, string> = {};
+      for (const [key, value] of Object.entries(record)) {
+        next[remap(key)] = value;
+      }
+      return next;
+    };
+
+    const scroll: Record<string, number> = {};
+    for (const [key, value] of Object.entries(this.state.scroll)) {
+      scroll[remap(key)] = value;
+    }
+    const drafts = remapRecord(this.state.drafts);
+
+    // 展开的目录路径也要跟着改：目录改名后不更新的话，那棵子树在树上会
+    // 「合起来」（展开状态指向了一个已不存在的路径）。
+    const expanded = this.state.expanded.map((item) => remap(item));
+
+    const activeTabId = this.state.activeTabId === null ? null : remap(this.state.activeTabId);
+
+    this.commit({ ...this.state, tabs, pinned, scroll, drafts, expanded, activeTabId }, true);
   }
 
   // -------------------------------------------------------------------------
@@ -777,6 +871,19 @@ export class NotesStore {
     this.state = { ...this.state, treeRevision: this.state.treeRevision + 1 };
     for (const listener of this.listeners) listener();
   }
+}
+
+/**
+ * 按文件名判断该用哪种编辑方式。
+ *
+ * `.md` / `.markdown` 走左编右渲，其余走单栏纯文本。
+ *
+ * @param name - 文件名。
+ * @returns `'md'` 或 `'txt'`。
+ */
+function kindForName(name: string): 'md' | 'txt' {
+  const lower = name.toLowerCase();
+  return lower.endsWith('.md') || lower.endsWith('.markdown') ? 'md' : 'txt';
 }
 
 /**

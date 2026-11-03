@@ -9,6 +9,7 @@
  * 注册全部走 ctx.slots.inject(...)：只有宿主真的声明了该席位，回调才执行。
  * 所以即使 DSH 未来删掉某个席位，插件也只是不显示，不会让启动失败。
  */
+import { IconListPenOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
 import { NotesApi } from './api';
 import { NotesPanel } from './NotesPanel';
 import { NotesStore } from './store';
@@ -74,26 +75,27 @@ const en = {
 
 /**
  * 左侧栏的笔记图标。
+ *
+ * 【为什么直接用 primitives 的图标，而不是手写 SVG】手写过一版
+ * `stroke="currentColor"` + `strokeWidth: 1.5/1.7` 的图标，和 DSH 自己的图标
+ * 摆在一排里**明显更粗更黑**。原因有两层：
+ *
+ * 1. **画法不同**：DSH 的图标是「外框用 `fill` 填成细线、内部细节用 `stroke`」
+ *    的混合画法，描边式在视觉上天然更重；
+ * 2. **线宽不同**：官方 `*Regular` 的 `strokeWidth` 是 **1**（`Medium` 才有 1.3），
+ *    而手写那版用了 1.5，选中态还加到 1.7。
+ *
+ * 用官方组件之后，线宽、画法、`viewBox` 全都跟随 DSH，**顺便还解决了
+ * 「DSH 改图标风格后本插件看起来像外人」的问题** —— 换图标是 DSH 那边的事，
+ * 这里不用跟着改。
+ *
+ * 选中态不再加粗：DSH 自己的图标也不这么做（选中靠背景高亮表达，
+ * 加粗会让图标比邻居突兀）。
+ *
  * @param props - 宿主给的面板图标属性（尺寸 + 是否选中）。
  */
-function NotesIcon({ size, active }: { size: number; active: boolean }): JSX.Element {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={active ? 1.7 : 1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M4 2.2h6.2L13 5v8.8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3.2a1 1 0 0 1 1-1Z" />
-      <path d="M10 2.2V5h3" />
-      <path d="M5.4 8h5.2M5.4 10.6h3.6" />
-    </svg>
-  );
+function NotesIcon({ size }: { size: number; active: boolean }): JSX.Element {
+  return <IconListPenOutlineRegular size={size} />;
 }
 
 // ---------------------------------------------------------------------------

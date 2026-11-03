@@ -16,8 +16,10 @@ import { basename, dirname, extname, isAbsolute, join, normalize, resolve, sep }
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import z from '@deepseek-ai/schemastery';
 import { isVolatile } from '@deepseek-ai/cosmokit';
+import { defaultAgentFilePath, isDefaultAgentFile, validateAgentFilePath } from './globalInstructions.js';
 
 /** cordis 插件名（稳定标识）。 */
 export const name = 'notes';
@@ -1528,6 +1530,62 @@ async function uniquePath(dir: string, name: string): Promise<string> {
 }
 
 /**
+ * 校验一个「文件名」是否可用。
+ *
+ * 只允许单层文件名（不含路径分隔符），杜绝用 name 里塞路径或 `..`。
+ * 与 `create` 路由用的是同一套规则 —— 两处必须一致，否则「新建能过的名字」
+ * 到「重命名」就会报错，用户会觉得莫名其妙。
+ *
+ * @param rawName - 客户端给的新名字。
+ * @returns 去掉首尾空白后的名字。
+ */
+function validateFileName(rawName: unknown): string {
+  if (typeof rawName !== 'string' || rawName.trim() === '') {
+    throw new HttpError(400, 'name is required');
+  }
+  const name = rawName.trim();
+  if (name.includes('/') || name.includes('\\') || name.includes('\0')) {
+    throw new HttpError(400, 'name must not contain path separators');
+  }
+  if (name === '.' || name === '..') {
+    throw new HttpError(400, 'invalid name');
+  }
+  return name;
+}
+
+/**
+ * 重命名一个文件或目录（只改名字，不换目录）。
+ *
+ * 与 `movePath` 的区别：目标始终在**源所在的同一个目录**里 —— 用户在文件树
+ * 里点「重命名」时想的是「改这个名字」，不是「换个地方」。要换地方用拖拽。
+ *
+ * 目标已存在同名项时报 409，避免静默覆盖用户的东西。
+ *
+ * @param source - 源路径（绝对）。
+ * @param newName - 新文件名（单层，不含路径分隔符）。
+ * @returns 重命名后的新路径。
+ */
+async function renamePath(source: string, newName: string): Promise<string> {
+  const name = validateFileName(newName);
+  const target = join(dirname(source), name);
+
+  // 名字没变：直接当成功返回，不打扰用户。
+  if (target === source) return source;
+
+  // 目标已存在：报错，不覆盖。
+  try {
+    await stat(target);
+    throw new HttpError(409, `目标位置已有同名文件：${name}`);
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    // stat 失败即目标不存在，可以重命名。
+  }
+
+  await rename(source, target);
+  return target;
+}
+
+/**
  * 移动文件或目录到另一个目录下。
  *
  * 只接受「文件」与「目录」，且目标必须是目录。同目录移动视为无操作，
@@ -1617,12 +1675,16 @@ export const ROUTES = {
   create: '/api/dsh-notes/create',
   remove: '/api/dsh-notes/remove',
   move: '/api/dsh-notes/move',
+  rename: '/api/dsh-notes/rename',
   health: '/api/dsh-notes/health',
   latestVersion: '/api/dsh-notes/latest-version',
   skills: '/api/dsh-notes/skills',
   skillContent: '/api/dsh-notes/skill-content',
   readSkillFile: '/api/dsh-notes/read-skill-file',
   skillTree: '/api/dsh-notes/skill-tree',
+  globalInstructions: '/api/dsh-notes/global-instructions',
+  readGlobalInstruction: '/api/dsh-notes/read-global-instruction',
+  writeGlobalInstruction: '/api/dsh-notes/write-global-instruction',
   config: '/api/dsh-notes/config',
 } as const;
 
@@ -2062,6 +2124,32 @@ export function makeRoutes(
       },
     },
 
+    // ---- 重命名文件/目录（只改名字，不换目录）----
+    {
+      kind: 'exact',
+      path: ROUTES.rename,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'POST')) return;
+        try {
+          const body = await readJsonBody(req, 64 * 1024);
+          if (body === null) throw new HttpError(400, 'invalid JSON body');
+
+          const { path, name, root } = body as { path?: unknown; name?: unknown; root?: unknown };
+          const rootDir = String(root ?? '');
+
+          // 源必须在根目录之内；新名字是单层文件名（validateFileName 会校验），
+          // 所以重命名后仍然落在同一个目录里 —— 不会借此越出根目录。
+          const { target: source } = resolveInsideRoot(String(path ?? ''), rootDir);
+          const newName = validateFileName(name);
+
+          const renamed = await renamePath(source, newName);
+          writeJson(res, 200, { ok: true, from: source, to: renamed, name: basename(renamed) });
+        } catch (error) {
+          fail(res, error);
+        }
+      },
+    },
+
     // ---- 健康检查 ----
     {
       kind: 'exact',
@@ -2304,6 +2392,121 @@ export function makeRoutes(
             roots.map((root) => resolve(root.path)),
           );
           writeJson(res, 200, tree);
+        } catch (error) {
+          fail(res, error);
+        }
+      },
+    },
+
+    // ---- 预置的 agent 指令文件（DSH 自己那一条）----
+    {
+      kind: 'exact',
+      path: ROUTES.globalInstructions,
+      handler: (req, res) => {
+        if (!guard(req, res, 'GET')) return;
+        // 只回「DSH 默认会加载的那一条」。其余交给用户自己添加 ——
+        // 本插件是通用的，不替用户假设他还有哪些指令文件。
+        const path = defaultAgentFilePath();
+        writeJson(res, 200, {
+          ok: true,
+          defaultFile: { path, name: basename(path), exists: existsSync(path) },
+        });
+      },
+    },
+
+    // ---- 读一个 agent 指令文件 ----
+    {
+      kind: 'exact',
+      path: ROUTES.readGlobalInstruction,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'GET')) return;
+        try {
+          const raw = query(req, 'path');
+          if (raw === undefined || raw === '') throw new HttpError(400, 'expected ?path=<abs>');
+
+          // 围栏：路径本身合规即可（绝对 + 文本扩展名）。授权来源是
+          // **用户亲手把这个路径加进来**这件事，不靠预置清单。
+          let target: string;
+          try {
+            target = validateAgentFilePath(raw);
+          } catch (error) {
+            throw new HttpError(400, error instanceof Error ? error.message : String(error));
+          }
+
+          const info = await stat(target).catch(() => null);
+          if (info === null) {
+            // 文件还没建：给空内容，客户端据此显示「尚未创建」并允许直接写。
+            writeJson(res, 200, {
+              path: target,
+              name: basename(target),
+              content: '',
+              size: 0,
+              mtimeMs: 0,
+              exists: false,
+              isDefault: isDefaultAgentFile(target),
+            });
+            return;
+          }
+          if (!info.isFile()) throw new HttpError(400, 'not a regular file');
+          const limit = maxRead();
+          if (info.size > limit) throw new HttpError(413, `file exceeds ${limit} bytes`);
+
+          writeJson(res, 200, {
+            path: target,
+            name: basename(target),
+            content: await readFile(target, 'utf8'),
+            size: info.size,
+            mtimeMs: info.mtimeMs,
+            exists: true,
+            isDefault: isDefaultAgentFile(target),
+          });
+        } catch (error) {
+          fail(res, error);
+        }
+      },
+    },
+
+    // ---- 写一个 agent 指令文件 ----
+    {
+      kind: 'exact',
+      path: ROUTES.writeGlobalInstruction,
+      handler: async (req, res) => {
+        if (!guard(req, res, 'POST')) return;
+        try {
+          const limit = maxWrite();
+          const body = await readJsonBody(req, limit + 64 * 1024);
+          if (body === null) throw new HttpError(400, 'invalid JSON body');
+
+          const { path: rawPath, content } = body as { path?: unknown; content?: unknown };
+
+          // 围栏与读同一条。
+          let target: string;
+          try {
+            target = validateAgentFilePath(rawPath);
+          } catch (error) {
+            throw new HttpError(400, error instanceof Error ? error.message : String(error));
+          }
+
+          const text = typeof content === 'string' ? content : '';
+          if (Buffer.byteLength(text, 'utf8') > limit) {
+            throw new HttpError(413, `content exceeds ${limit} bytes`);
+          }
+
+          // 目录可能还不存在（用户新建 `~/.dsh/` 之外的路径）—— 补上。
+          // 只建到目标文件的父目录，不做任何更上层的猜测。
+          await mkdir(dirname(target), { recursive: true });
+          // 原子写：先写同目录临时文件再 rename，避免中途失败留下半个文件。
+          await atomicWrite(target, text);
+          const after = await stat(target);
+
+          writeJson(res, 200, {
+            ok: true,
+            path: target,
+            name: basename(target),
+            size: after.size,
+            mtimeMs: after.mtimeMs,
+            isDefault: isDefaultAgentFile(target),
+          });
         } catch (error) {
           fail(res, error);
         }

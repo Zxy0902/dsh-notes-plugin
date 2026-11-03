@@ -7,10 +7,20 @@
  * 全部内联：不引外部资源，随主题色走（`currentColor`）。
  */
 
+/**
+ * 统一的描边规格。
+ *
+ * 【线宽为什么是 1 而不是 1.5】DSH 官方的图标（`@deepseek-ai/dsh-client-ui-primitives`
+ * 里的 `*Regular` 系列）用的是 **strokeWidth: 1**，`Medium` 才有 1.3。
+ * 本面板里 `FileTypeIcon`、`SegmentedControl` 等都是官方组件，图标混在一起时
+ * 1.5 会明显比它们粗一圈 —— 之前侧栏的「笔记」图标就是这样露的马脚。
+ *
+ * 想加粗只加在**需要强调的单个图标**上（如 `IconClose`），不要改这个基准。
+ */
 const stroke = {
   fill: 'none',
   stroke: 'currentColor',
-  strokeWidth: 1.5,
+  strokeWidth: 1,
   strokeLinecap: 'round' as const,
   strokeLinejoin: 'round' as const,
 };
@@ -18,7 +28,10 @@ const stroke = {
 /** 关闭（`×`）：tab 上的关闭键、弹层右上角。 */
 export function IconClose({ size = 10 }: { size?: number }): JSX.Element {
   return (
-    <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} strokeWidth={1.9} aria-hidden="true">
+    /* 小尺寸图标要按比例补偿线宽：渲染 10px 时，1.6 的设定值 = 实际 1px，
+       与官方 Regular 在 16px 下的观感一致。下面 IconCaret / IconCheck 同理
+       （1.78×9/16≈1.0、1.45×11/16≈1.0）。 */
+    <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} strokeWidth={1.6} aria-hidden="true">
       <path d="M4 4l8 8M12 4l-8 8" />
     </svg>
   );
@@ -65,7 +78,7 @@ export function IconFolder({ size = 14 }: { size?: number }): JSX.Element {
 /** 折叠箭头。 */
 export function IconCaret(): JSX.Element {
   return (
-    <svg width="9" height="9" viewBox="0 0 16 16" {...stroke} strokeWidth={2} aria-hidden="true">
+    <svg width="9" height="9" viewBox="0 0 16 16" {...stroke} strokeWidth={1.78} aria-hidden="true">
       <path d="M6 4l4 4-4 4" />
     </svg>
   );
@@ -122,7 +135,7 @@ export function IconUnfoldLess({ size = 13 }: { size?: number }): JSX.Element {
 /** 勾选：下拉里表示「当前选中的那一项」。 */
 export function IconCheck({ size = 11 }: { size?: number }): JSX.Element {
   return (
-    <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} strokeWidth={1.8} aria-hidden="true">
+    <svg width={size} height={size} viewBox="0 0 16 16" {...stroke} strokeWidth={1.45} aria-hidden="true">
       <path d="M3.4 8.4 6.6 11.6 12.6 4.8" />
     </svg>
   );

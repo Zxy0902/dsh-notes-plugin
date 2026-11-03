@@ -186,17 +186,7 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dsh-notes__pin-x {
-  flex: 0 0 16px;
-  height: 16px;
-  display: grid;
-  place-items: center;
-  border-radius: 4px;
-  opacity: 0;
-  color: var(--dsw-alias-label-secondary);
-}
-.dsh-notes__pin:hover .dsh-notes__pin-x { opacity: 1; }
-.dsh-notes__pin-x:hover { background: color-mix(in srgb, currentColor 14%, transparent); color: var(--dsw-alias-state-error-primary, #e5484d); }
+
 
 .dsh-notes__hint {
   padding: 4px 10px 8px;
@@ -449,6 +439,23 @@ html[data-platform='darwin'] .dsh-notes__dragband {
 }
 .dsh-notes__caret--open { transform: rotate(90deg); }
 .dsh-notes__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 行内重命名输入框：替换掉那一行的文件名标签。
+   宽度要跟着行走（flex:1），否则长文件名会被输入框截断、看不见自己在改什么。
+   边框走品牌色，一眼能看出「这一行正在编辑」。 */
+.dsh-notes__rename {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  padding: 0 4px;
+  border: 1px solid var(--dsw-alias-brand-primary);
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-overlay);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12.5px;
+  outline: none;
+  user-select: text;
+}
 .dsh-notes__pinmark {
   flex: 0 0 16px;
   height: 16px;
@@ -956,6 +963,118 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   border-radius: 999px;
   background: var(--dsw-alias-bg-layer-2);
   font-weight: 500;
+}
+
+/* ---------------- agent 指令区 ---------------- */
+/* 放在技能列表之上：它是「配置级」的东西，与一条条技能不是同一层。 */
+.dsh-notes__agenthint {
+  padding: 0 10px 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-notes__agentadd {
+  display: flex;
+  gap: 6px;
+  padding: 2px 10px 8px;
+}
+.dsh-notes__agentinput {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+}
+.dsh-notes__agentinput:focus {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary);
+}
+/* 一整行可点：名称与路径都在按钮里，点哪都能打开。 */
+.dsh-notes__agentrow {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  border-left: 2px solid transparent;
+  border-radius: 6px;
+}
+/* 刚添加的那一行：整行淡淡地亮起来 + 左侧竖条。
+   只靠一个「刚添加」标签不够 —— 列表长的时候用户扫不到那行具体在哪。
+   用品牌色（不是状态色）：这是「注意这里」，不是警告。 */
+.dsh-notes__agentrow--new {
+  border-left-color: var(--dsw-alias-brand-primary);
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent);
+}
+/* 刚添加的标签：实心品牌色，比旁边的描边标签更显眼（它是要被看到的那一个）。 */
+.dsh-notes__agenttag-new {
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--dsw-alias-brand-primary);
+  font-size: 10px;
+  font-weight: 600;
+  /* 品牌色底上的前景走主题自带的 invert 变体：写死白色在暗色主题下
+     对比度不够（那条品牌色偏亮）。 */
+  color: var(--dsw-alias-brand-primary-invert, #ffffff);
+}
+.dsh-notes__agentpick {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dsh-notes__agentpick:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.dsh-notes__agentname {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.dsh-notes__agentpath {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+/* 「尚未创建」：用次要色，不要像错误 —— 没建过是正常状态。 */
+.dsh-notes__agenttag-missing {
+  padding: 0 5px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+}
+.dsh-notes__agentx {
+  flex: 0 0 22px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  opacity: 0;
+}
+.dsh-notes__agentrow:hover .dsh-notes__agentx { opacity: 1; }
+.dsh-notes__agentx:hover {
+  background: color-mix(in srgb, currentColor 14%, transparent);
+  color: var(--dsw-alias-state-error-primary, #e5484d);
 }
 
 /* ---------------- 文件夹下拉 ---------------- */

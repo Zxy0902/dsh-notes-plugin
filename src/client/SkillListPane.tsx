@@ -11,7 +11,8 @@
  * 文件夹树（见 `SkillTreePane`）。列表只负责「挑一条」。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { NotesApi, SkillListing, SkillSummary } from './api';
+import { AgentFilesPane } from './AgentFilesPane';
+import type { AgentInstructionFile, NotesApi, SkillListing, SkillSummary } from './api';
 import { IconClose, IconRefresh, IconSkill } from './icons';
 import { dirnameOf, messageOf } from './paths';
 
@@ -33,6 +34,14 @@ export interface SkillListPaneProps {
   refreshing: boolean;
   /** 关掉技能页、回到刚才的笔记（右上角 ×）。 */
   onClose: () => void;
+  /** 用户自己添加的 agent 指令文件路径。 */
+  agentFiles: readonly string[];
+  /** 点开一个 agent 指令文件（在右侧开 tab）。 */
+  onOpenAgentFile: (file: AgentInstructionFile) => void;
+  /** 添加一个 agent 指令文件路径。 */
+  onAddAgentFile: (path: string) => void;
+  /** 从列表里移除一个 agent 指令文件（不删文件）。 */
+  onRemoveAgentFile: (path: string) => void;
 }
 
 /**
@@ -244,6 +253,17 @@ export function SkillListPane(props: SkillListPaneProps): JSX.Element {
             </p>
           </div>
         )}
+
+        {/* agent 指令文件：放在技能列表之上 —— 它是「配置级」的东西，
+            与「一条条技能」不是同一层，混在技能分组中间会被当成技能。 */}
+        <AgentFilesPane
+          api={api}
+          paths={props.agentFiles}
+          onOpen={props.onOpenAgentFile}
+          onAdd={props.onAddAgentFile}
+          onRemove={props.onRemoveAgentFile}
+          onNotice={onNotice}
+        />
 
         {/* 两组分开：内置在上（数量固定、不可改），自己的在下（用户真正关心的）。 */}
         {groups.bundled.length > 0 && (

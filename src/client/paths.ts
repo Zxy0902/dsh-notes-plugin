@@ -57,6 +57,22 @@ export function isSkillFile(path: string): boolean {
 }
 
 /**
+ * 把一个文件名拆成「主干」与「扩展名」。
+ *
+ * 重命名时要用：用户改的通常只是主干（`周会纪要`），扩展名（`.md`）要留着。
+ * 点号开头的文件名（`.gitignore`）整段算主干，没有扩展名。
+ *
+ * @param name - 文件名。
+ * @returns `{ stem, ext }`：`ext` 含前导点；没有扩展名时是空串。
+ */
+export function splitName(name: string): { stem: string; ext: string } {
+  const dot = name.lastIndexOf('.');
+  // 点在开头 = 隐藏文件（`.gitignore`），整段都是名字。
+  if (dot <= 0) return { stem: name, ext: '' };
+  return { stem: name.slice(0, dot), ext: name.slice(dot) };
+}
+
+/**
  * 「在系统文件管理器里定位到文件」这项菜单的文案。
  *
  * 各平台对这个动作的叫法不同（macOS 的访达、Windows 的资源管理器、Linux 各家

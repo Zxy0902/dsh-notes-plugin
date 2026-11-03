@@ -16,12 +16,16 @@ export const API = {
   create: 'api/dsh-notes/create',
   remove: 'api/dsh-notes/remove',
   move: 'api/dsh-notes/move',
+  rename: 'api/dsh-notes/rename',
   health: 'api/dsh-notes/health',
   latestVersion: 'api/dsh-notes/latest-version',
   skills: 'api/dsh-notes/skills',
   skillContent: 'api/dsh-notes/skill-content',
   readSkillFile: 'api/dsh-notes/read-skill-file',
   skillTree: 'api/dsh-notes/skill-tree',
+  globalInstructions: 'api/dsh-notes/global-instructions',
+  readGlobalInstruction: 'api/dsh-notes/read-global-instruction',
+  writeGlobalInstruction: 'api/dsh-notes/write-global-instruction',
 } as const;
 
 /** 宿主能力探测结果。 */
@@ -157,6 +161,25 @@ export interface SkillListing {
   registeredProviders?: string[];
 }
 
+/** 一条 agent 指令文件（DSH 会在会话开头注入给模型的那种）。 */
+export interface AgentInstructionFile {
+  /** 文件名（`AGENTS.md` 等）。 */
+  name: string;
+  /** 绝对路径。 */
+  path: string;
+  /** 文件当前是否存在（不存在时客户端给「尚未创建」）。 */
+  exists: boolean;
+  /** 是不是 DSH 预置的那一条（`~/.dsh/AGENTS.md`）。 */
+  isDefault: boolean;
+}
+
+/** 读一个 agent 指令文件的结果。 */
+export interface AgentInstructionContent extends AgentInstructionFile {
+  content: string;
+  size: number;
+  mtimeMs: number;
+}
+
 /** 带宿主错误信息的 API 异常。 */
 export class NotesApiError extends Error {
   constructor(
@@ -241,6 +264,25 @@ export class NotesApi {
   }
 
   /**
+   * 重命名一个文件或目录（只改名字，不换目录）。
+   *
+   * 新名字是**单层文件名**：不能带路径分隔符，宿主会拒绝 —— 这是防止用名字
+   * 越出根目录。目标已存在同名项时宿主返回 409，客户端负责把它翻译成人话。
+   *
+   * @param root - 文件所属的根目录。
+   * @param path - 要重命名的路径（绝对）。
+   * @param name - 新文件名。
+   * @returns 重命名后的路径与新名字。
+   */
+  rename(
+    root: string,
+    path: string,
+    name: string,
+  ): Promise<{ ok: true; from: string; to: string; name: string }> {
+    return this.request(API.rename, { method: 'POST', body: { root, path, name } });
+  }
+
+  /**
    * 列出当前可见的技能。
    *
    * 只读：数据来自 DSH 官方 skill 注册表，本插件不做启用/禁用，也不改任何文件。
@@ -293,6 +335,41 @@ export class NotesApi {
     return this.request(`${API.skillTree}?path=${encodeURIComponent(path)}`);
   }
 
+  /**
+   * 取 DSH 预置的 agent 指令文件（`~/.dsh/AGENTS.md`，跟随 `$DSH_HOME`）。
+   *
+   * 只回这一条：本插件是通用的，不替用户假设他还有哪些指令文件。
+   * 别的文件由用户自己添加（路径存在本地状态里）。
+   */
+  defaultAgentFile(): Promise<{ ok: true; defaultFile: AgentInstructionFile }> {
+    return this.request(API.globalInstructions);
+  }
+
+  /**
+   * 读一个 agent 指令文件。
+   *
+   * 文件不存在时不报错，而是返回空内容 + `exists: false` —— 这样客户端能显示
+   * 「尚未创建」并允许直接新建，而不是甩一个 404。
+   *
+   * 宿主端的围栏是「绝对路径 + 文本扩展名」：授权来源是用户亲手把这个路径
+   * 加进来，不靠预置清单。
+   */
+  readAgentFile(path: string): Promise<AgentInstructionContent> {
+    return this.request(`${API.readGlobalInstruction}?path=${encodeURIComponent(path)}`);
+  }
+
+  /**
+   * 写一个 agent 指令文件。
+   *
+   * 文件不存在会连父目录一起建好。
+   */
+  writeAgentFile(
+    path: string,
+    content: string,
+  ): Promise<{ ok: true; path: string; name: string; size: number; mtimeMs: number; isDefault: boolean }> {
+    return this.request(API.writeGlobalInstruction, { method: 'POST', body: { path, content } });
+  }
+
   /** 读取宿主能力（目前用于判断本平台是否支持删除）。 */
   health(): Promise<HostHealth> {
     return this.request(API.health);
@@ -304,8 +381,9 @@ export class NotesApi {
    * 由**本插件自己的宿主半边**去问 npm —— 不用插件管理服务的 `inspect`：
    * 那个接口是「安装前校验」，已安装的包会被它以 `already-installed` 拒绝。
    *
-   * 404 会被翻译成可执行的提示：客户端半边是热更的、宿主半边要重启才会加载新路由，
-   * 两者不同步时这里必然 404，直接说清楚比丢个状态码让用户猜有用。
+   * 404 会被翻译成可执行的提示（见 `request` 里的统一处理）：客户端半边是热更的、
+   * 宿主半边要重启才会加载新路由，两者不同步时这里必然 404，
+   * 直接说清楚比丢个状态码让用户猜有用。
    *
    * @param fresh - true 时绕过宿主端 5 分钟缓存（用户手动点「重新检查」）。
    * @returns 包名、最新版本号，以及该版本的 tarball 直链（宿主 0.1.7 起提供）。
@@ -348,6 +426,12 @@ export class NotesApi {
         }
       } catch {
         // 保留默认文案。
+      }
+      // 404 的常见原因不是「地址写错了」，而是**宿主半边还跑着旧代码**：
+      // 客户端半边有热更（刷新页面即可生效），宿主半边必须重启进程。
+      // 两者不同步时，新加的路由必然 404 —— 直说「重启 DSH」比丢个状态码有用。
+      if (response.status === 404) {
+        message = '宿主还没加载这个新功能（客户端已更新、宿主未重启），请完全退出并重开 DSH';
       }
       throw new NotesApiError(message, response.status);
     }

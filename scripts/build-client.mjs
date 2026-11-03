@@ -32,6 +32,8 @@ const MODULES = [
   // 被下面几乎所有组件引用，必须排在最前。
   'lib/client/paths.js',
   'lib/client/icons.js',
+  // 编辑栏的 Tab 缩进逻辑（纯函数，无 React 依赖）。
+  'lib/client/indent.js',
   // 按功能拆开的界面块，顺序即依赖顺序（被依赖者在前）：
   // Dialogs → TabStrip / Panes 都用它；EditorPane、Sidebar 相对独立；
   // 技能三件套（列表 / 正文 / 左侧树）互相不引用，但都被 NotesPanel 引用。
@@ -40,6 +42,9 @@ const MODULES = [
   'lib/client/Panes.js',
   'lib/client/EditorPane.js',
   'lib/client/Sidebar.js',
+  // agent 指令区（DSH 全局 AGENTS.md 的查看/编辑入口）。
+  // 被 SkillListPane 引用，所以必须排在它**前面**。
+  'lib/client/AgentFilesPane.js',
   'lib/client/SkillListPane.js',
   'lib/client/SkillPanes.js',
   'lib/client/SkillTreePane.js',

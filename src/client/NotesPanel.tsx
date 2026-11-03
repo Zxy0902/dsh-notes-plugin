@@ -7,7 +7,7 @@
  * - 手动保存：Cmd/Ctrl+S 或保存按钮；未保存时 tab 上显示小圆点
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { NotesApi, type DirEntry, type SkillSummary, type SkillTreeNode } from './api';
+import { NotesApi, type AgentInstructionFile, type DirEntry, type SkillSummary, type SkillTreeNode } from './api';
 import { basenameOf, dirnameOf, isSkillFile, messageOf, revealLabelOf } from './paths';
 import { IconFolder, IconSkill } from './icons';
 import { EditorPane } from './EditorPane';
@@ -87,6 +87,9 @@ export function NotesPanel({
   const [menu, setMenu] = useState<{ entry: DirEntry; x: number; y: number } | null>(null);
   /** 待确认删除的条目；非 null 时显示确认弹层。 */
   const [pendingDelete, setPendingDelete] = useState<DirEntry | null>(null);
+
+  /** 正在行内重命名的条目路径；null 表示当前没有。 */
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
 
   /**
    * 技能阅读是否可用。
@@ -474,6 +477,27 @@ export function NotesPanel({
   }, [activeTab, folderScope, skillView, leaveSkill]);
 
   /**
+   * 打开一个 agent 指令文件（`~/.dsh/AGENTS.md` 等）。
+   *
+   * 做成**普通 tab**（kind 为 `global`），而不是独立视图：
+   * - 用现成的编辑器，左编右渲、⌘S 保存、大纲全都免费获得；
+   * - 可以和笔记并排放在 tab 栏里，改完指令顺手切回笔记继续写。
+   *
+   * 读写走专用通道（宿主按「绝对路径 + 文本扩展名」围栏），不依附任何笔记根。
+   * 用路径作 tab id：同一个文件重复点不会开出一排。
+   *
+   * @param file - 要打开的文件（可能还不存在，那样打开就是「新建」）。
+   */
+  const openAgentFile = useCallback(
+    (file: AgentInstructionFile) => {
+      // 打开 agent 文件等于回到「我自己要看的东西」：退出技能浏览，左右一起复位。
+      leaveSkill();
+      store.openTab({ id: file.path, name: file.name, path: file.path, kind: 'global' });
+    },
+    [store, leaveSkill],
+  );
+
+  /**
    * 打开技能目录页。
    *
    * 做成**单例 tab**：不管点多少次，都只有一个「技能」tab，不会开出一排。
@@ -563,6 +587,33 @@ export function NotesPanel({
       }
     },
     [api, draggingPath, state.root, store, flash],
+  );
+
+  /**
+   * 提交重命名：把文件/目录改成新名字。
+   *
+   * 成功后要做三件事，缺一件就会留下「幽灵引用」：
+   * 1. `remapPath` 把已打开的 tab、置顶项、草稿里的旧路径改成新路径
+   *    （目录改名时，里面每个文件的路径也变了 —— 所以要按前缀改，不只改顶层那条）；
+   * 2. 刷新文件树，让新名字显示出来；
+   * 3. 清掉重命名状态，退出输入态。
+   *
+   * 失败时留在输入态：用户改的名字还在框里，改一下就能重试，
+   * 不必从头再敲一遍。
+   */
+  const renameEntry = useCallback(
+    async (path: string, name: string) => {
+      try {
+        const result = await api.rename(state.root ?? '', path, name);
+        store.remapPath(result.from, result.to);
+        store.refreshTree();
+        setRenamingPath(null);
+        flash(`已重命名为「${result.name}」`);
+      } catch (error) {
+        flash(`重命名失败：${messageOf(error)}`);
+      }
+    },
+    [api, state.root, store, flash],
   );
 
   /**
@@ -750,6 +801,9 @@ export function NotesPanel({
           onDragEnd={() => setDraggingPath(null)}
           onDropInto={(destDir) => void dropInto(destDir)}
           onContextMenu={(entry, x, y) => setMenu({ entry, x, y })}
+          onRename={(path, name) => void renameEntry(path, name)}
+          onRenameCancel={() => setRenamingPath(null)}
+          renamingPath={renamingPath}
           fileVisibility={state.fileVisibility}
           onSetFileVisibility={(mode) => store.setFileVisibility(mode)}
           pinLayout={state.pinLayout}
@@ -814,6 +868,10 @@ export function NotesPanel({
                 onRefresh={refreshSkills}
                 refreshing={skillsRefreshing}
                 onClose={() => store.closeTab(SKILLS_TAB_ID)}
+                agentFiles={state.agentFiles}
+                onOpenAgentFile={openAgentFile}
+                onAddAgentFile={(path) => store.addAgentFile(path)}
+                onRemoveAgentFile={(path) => store.removeAgentFile(path)}
               />
             ) : activeTab.kind === 'external' ? (
               <ExternalPane
@@ -863,10 +921,14 @@ export function NotesPanel({
           y={menu.y}
           onClose={() => setMenu(null)}
           items={[
-            { label: '打开', onPick: () => openFile(menu.entry) },
+            // 目录没有「打开」可言（点它就是展开/收起），也没有置顶与删除
+            // —— 那两个只对文件有意义。目录的菜单里只留「重命名」与「定位」。
+            ...(menu.entry.kind === 'directory'
+              ? []
+              : [{ label: '打开', onPick: () => openFile(menu.entry) }]),
             // 技能文件（SKILL.md）属于 DSH 自己的资产，不是用户的笔记：
             // 置顶会把它混进「我的收藏」，删除更会直接破坏技能。两者都不给。
-            ...(isSkillFile(menu.entry.path)
+            ...(menu.entry.kind === 'directory' || isSkillFile(menu.entry.path)
               ? []
               : [
                   {
@@ -874,8 +936,20 @@ export function NotesPanel({
                     onPick: () => togglePin(menu.entry.path),
                   },
                 ]),
-            // 定位与删除都属于「对文件本身的操作」，与上面的打开/置顶用分隔线隔开。
-            ...(canReveal || canDelete ? [{ separator: true as const }] : []),
+            // 定位、重命名与删除都属于「对文件本身的操作」，与上面的打开/置顶
+            // 用分隔线隔开。
+            ...(canReveal || canDelete || !isSkillFile(menu.entry.path)
+              ? [{ separator: true as const }]
+              : []),
+            // 重命名：技能文件不给 —— 那是 DSH 自己的资产，改名会破坏技能。
+            ...(!isSkillFile(menu.entry.path)
+              ? [
+                  {
+                    label: '重命名',
+                    onPick: () => setRenamingPath(menu.entry.path),
+                  },
+                ]
+              : []),
             // 文案跟随平台：系统自己怎么叫就怎么写，用户才知道文件会出现在哪。
             ...(canReveal
               ? [
@@ -886,8 +960,9 @@ export function NotesPanel({
                 ]
               : []),
             // 删除只在支持移入系统回收站的平台出现（见 canDelete 的说明），
-            // 且技能文件一律不给删除入口。
-            ...(canDelete && !isSkillFile(menu.entry.path)
+            // 且技能文件一律不给删除入口。目录也不给 —— 删除目录涉及递归，
+            // 宿主那边也只允许删普通文件。
+            ...(canDelete && !isSkillFile(menu.entry.path) && menu.entry.kind !== 'directory'
               ? [{ label: '删除', danger: true, onPick: () => setPendingDelete(menu.entry) }]
               : []),
           ]}
