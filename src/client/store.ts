@@ -83,6 +83,14 @@ export interface NotesState {
    */
   mdViewMode: MdViewMode;
   /**
+   * 是否给代码文件染色（`.sql`、`.java`、`.py` 等按语法着色）。
+   *
+   * 全局偏好：读者对「要不要看颜色」的习惯是稳定的，不该每个文件问一次。
+   * 默认关 —— 染色会把显示方式限制成「预览」，改变既有行为，所以让用户
+   * 自己开，而不是升级后突然发现编辑框没了。
+   */
+  codeColor: boolean;
+  /**
    * 大纲栏是否展开。
    *
    * 也是全局偏好而不是每个 tab 一份：读者对「要不要看目录」的习惯是稳定的，
@@ -153,6 +161,7 @@ function emptyState(): NotesState {
     fileVisibility: 'editable',
     mdViewMode: 'split',
     outlineOpen: true,
+    codeColor: false,
     pinLayout: 'two',
     agentFiles: [],
     treeRevision: 0,
@@ -229,6 +238,8 @@ function reviveState(raw: unknown): NotesState {
       input.mdViewMode === 'edit' ? 'edit' : input.mdViewMode === 'preview' ? 'preview' : 'split',
     // 旧数据没有这个字段：默认展开（大多数人第一次就想要目录）。
     outlineOpen: input.outlineOpen !== false,
+    // 旧数据没有这个字段：默认关（见字段说明）。
+    codeColor: input.codeColor === true,
     pinLayout: input.pinLayout === 'one' ? 'one' : 'two',
     agentFiles: Array.isArray(input.agentFiles)
       ? input.agentFiles.filter((p): p is string => typeof p === 'string' && p !== '')
@@ -414,6 +425,16 @@ export class NotesStore {
   setMdViewMode(mode: MdViewMode): void {
     if (this.state.mdViewMode === mode) return;
     this.commit({ ...this.state, mdViewMode: mode }, true);
+  }
+
+  /**
+   * 开关代码染色。
+   *
+   * 立即落盘：显式偏好，下次打开应当保持。
+   */
+  setCodeColor(on: boolean): void {
+    if (this.state.codeColor === on) return;
+    this.commit({ ...this.state, codeColor: on }, true);
   }
 
   /**

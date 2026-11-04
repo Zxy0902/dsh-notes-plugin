@@ -34,6 +34,9 @@ const MODULES = [
   'lib/client/icons.js',
   // 编辑栏的 Tab 缩进逻辑（纯函数，无 React 依赖）。
   'lib/client/indent.js',
+  // 代码染色：判定逻辑（纯函数）在前，渲染组件在后。
+  'lib/client/codeColor.js',
+  'lib/client/CodeColorView.js',
   // 按功能拆开的界面块，顺序即依赖顺序（被依赖者在前）：
   // Dialogs → TabStrip / Panes 都用它；EditorPane、Sidebar 相对独立；
   // 技能三件套（列表 / 正文 / 左侧树）互相不引用，但都被 NotesPanel 引用。

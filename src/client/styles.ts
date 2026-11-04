@@ -865,6 +865,9 @@ html[data-platform='darwin'] .dsh-notes__dragband {
    否则窄窗下代码块工具条一样会悬空。 */
 .dsh-notes--narrow .dsh-notes__editor { padding: 14px 16px 40px; }
 .dsh-notes--narrow .dsh-notes__preview { padding: 0 16px 40px; }
+/* 窄容器下左右边距只有 16px，行号列必须跟着收窄，否则整块左移超过边距、
+   行号会被切到可视区外。 */
+.dsh-notes--narrow .dsh-notes__codecolor { --dsh-notes-gutter: 16px; }
 .dsh-notes--narrow .dsh-notes__preview > *:first-child { margin-top: 14px; }
 
 /* 窄容器下左栏不渲染，贴着窗口左上角的就是阅读区，此时改由它承担避让：
@@ -959,6 +962,167 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   border-radius: 999px;
   background: var(--dsw-alias-bg-layer-2);
   font-weight: 500;
+}
+
+/* ---------------- 代码染色 ---------------- */
+/*
+ * 【染色是「叠加」而不是「另一种显示方式」】
+ *
+ * 下面一层 CodeColorView 画出带颜色的文字，上面一层 textarea 的文字设为全透明，
+ * 只保留光标和选区。两层共用同一套字号 / 行高 / 内边距 / 制表符宽度，
+ * 所以彩色文字与光标位置严丝合缝 —— 开了染色照样能打字、选中、滚动、保存。
+ *
+ * 为什么不让 textarea 自己上色：textarea 只能显示纯文本，这是浏览器限制，
+ * 没有别的办法。也不要改成 contenteditable —— 那会毁掉撤销、输入法和
+ * ⌘S 那套现有逻辑。
+ */
+.dsh-notes__codewrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+.dsh-notes__codepaint {
+  position: absolute;
+  inset: 0;
+  /* 滚不滚动由上面的 textarea 事件驱动，这里只负责裁剪。 */
+  overflow: hidden;
+  /* 绝不能接收鼠标事件：否则会挡住编辑框的点击、拖选和光标定位。 */
+  pointer-events: none;
+}
+/* 这一层由 JS 用 translate 平移来跟随编辑框滚动（见 EditorPane 的 onPaintScroll），
+   自己**不能**滚动：两层各滚一份就会错位。 */
+.dsh-notes__preview--paint {
+  overflow: visible;
+  will-change: transform;
+}
+.dsh-notes__editor--paint {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* 文字透明：颜色全由下面那层画。caret-color 必须给，否则光标也跟着透明。 */
+  color: transparent;
+  background: transparent;
+  caret-color: var(--dsw-alias-label-primary);
+  overflow: auto;
+}
+/* 选区底色要半透明：不透明的话会把下面的彩色文字整块盖住，
+   选中一段就变成一片纯色，看不清选了什么。 */
+.dsh-notes__editor--paint::selection {
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #4dabf7) 28%, transparent);
+}
+/* 输入法组字（打中文）期间：把文字显示回来，同时藏起着色层。
+   否则组字中的候选字是透明的，等于闭着眼睛打字。 */
+.dsh-notes__codewrap--composing .dsh-notes__codepaint {
+  display: none;
+}
+.dsh-notes__codewrap--composing .dsh-notes__editor--paint {
+  color: var(--dsw-alias-label-primary);
+}
+/*
+ * 【自带色板】为什么需要它
+ *
+ * shiki 不写死颜色，它给每个 token 挂 color: var(--shiki-token-keyword)
+ * 这类**引用**，真实色值由 DSH 主题插件注入的 shiki.css 提供。只要那个变量
+ * 在运行环境里不存在，CSS 的 var() 就解析失败并**静默回落到继承色**（正文黑），
+ * 不报错、不崩溃 —— 表现就是「只有个别 token 有颜色，其余全黑」。
+ * 实测过：某环境里主题表只剩一个变量，于是 SQL 里只有反引号标识符显绿，
+ * SELECT / WHERE / 字符串 / 数字全是黑的。
+ *
+ * 所以渲染时把颜色写成三级回落：
+ *   var(--shiki-x, var(--dsh-notes-color-x, inherit))
+ * 主题提供了就用主题色（明暗主题照常跟随），没提供就用下面这套自带色板。
+ *
+ * 这段变量只挂在本插件自己的根类上，**不定义、不覆盖任何全局 --shiki-* **，
+ * 因此对 DSH 自身零影响 —— 只是我们自己的兜底，和主题表互不干涉。
+ */
+.dsh-notes__codecolor {
+  --dsh-notes-color-foreground: var(--dsw-alias-label-primary);
+  --dsh-notes-color-token-constant: #1c7ed6;
+  --dsh-notes-color-token-string: #2f9e44;
+  --dsh-notes-color-token-comment: #868e96;
+  --dsh-notes-color-token-keyword: #d6336c;
+  --dsh-notes-color-token-parameter: #e8590c;
+  --dsh-notes-color-token-function: #6741d9;
+  --dsh-notes-color-token-string-expression: #2b8a3e;
+  --dsh-notes-color-token-punctuation: #495057;
+  --dsh-notes-color-token-link: #1971c2;
+
+  /* 行号列宽 = 阅读区左边距。行号就住在这段留白里，正文起点因此和编辑框
+     完全一致 —— 点「染色」时正文不会左右跳，光标也压得准。 */
+  --dsh-notes-gutter: 30px;
+
+  /* 【把整块左移一个行号列宽】行号落进左边距那 30px，正文起点保持在 30px。
+     这是「切染色内容不跳位」的关键，别的写法都做不到既显示行号又不挪正文。 */
+  margin-left: calc(-1 * var(--dsh-notes-gutter));
+
+  /* 顶部**不能**有 padding：预览首个子元素已有 margin-top: 22px，
+     正好等于编辑框的 padding-top，两边的首行基线才对得上。 */
+  padding: 0 0 12px;
+
+  font-family: var(--dsh-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  /* 字号、行高、制表符宽度**必须和编辑框（.dsh-notes__editor）逐项一致**：
+     两层文字是叠在一起显示的（上面那层 textarea 文字透明），任何一项不同，
+     彩色文字和光标就会对不上，看起来像重影。tab-size 尤其容易漏 ——
+     它是元素自身属性、不继承，浏览器默认 8 列，漏了就整套缩进垮掉。 */
+  font-size: 12.5px;
+  line-height: 1.75;
+  tab-size: 2;
+  /* 代码不能折行：折了就看不出缩进层级，行号也会错位。超宽由外层横向滚动。 */
+  white-space: pre;
+}
+/* 暗色主题的兜底色板。选择器沿用 DSH 自己的暗色约定；
+   将来若 DSH 换了暗色标记，最坏结果只是兜底色偏亮，不会崩、不会丢失染色。 */
+body[data-ds-dark-theme] .dsh-notes__codecolor {
+  --dsh-notes-color-token-constant: #4dabf7;
+  --dsh-notes-color-token-string: #69db7c;
+  --dsh-notes-color-token-comment: #adb5bd;
+  --dsh-notes-color-token-keyword: #faa2c1;
+  --dsh-notes-color-token-parameter: #ffa94d;
+  --dsh-notes-color-token-function: #b197fc;
+  --dsh-notes-color-token-string-expression: #8ce99a;
+  --dsh-notes-color-token-punctuation: #ced4da;
+  --dsh-notes-color-token-link: #74c0fc;
+}
+.dsh-notes__codeline {
+  display: flex;
+  /* 悬停整行高亮时，行号列也要一起亮，所以高亮挂在行上而不是内容上。 */
+  border-radius: 3px;
+}
+.dsh-notes__codeline:hover {
+  background: color-mix(in srgb, currentColor 6%, transparent);
+}
+.dsh-notes__codeln {
+  flex: 0 0 var(--dsh-notes-gutter);
+  /* 右对齐：行数从 9 涨到 10 时，正文不会整体右移一格。 */
+  display: flex;
+  align-items: center;      /* 行号在自己那一格里垂直居中 */
+  justify-content: flex-end;
+  /* 比正文小一档：行号是辅助信息，字号小才塞得进 30px 边距里的 4 位数。
+     【line-height 必须写 1】若继承正文的 1.75，行号自己的行盒与正文高矮不同，
+     整行会被撑成两份高（实测每行 43.75px，正好两倍）。 */
+  font-size: 10px;
+  line-height: 1;
+  padding-right: 6px;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+  /* 行号不参与选中：复制代码时不会把行号一起带走。 */
+}
+.dsh-notes__codetext {
+  flex: 1;
+  min-width: 0;
+  white-space: pre;
+}
+/* 截断提示：只在大文件出现。用次要色、与代码区分开，别让人以为这是代码的一部分。 */
+.dsh-notes__codemore {
+  /* 与正文左对齐（整块已左移，这里补回一个行号列宽）。 */
+  padding: 10px 0 2px var(--dsh-notes-gutter);
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
 }
 
 /* ---------------- agent 指令区 ---------------- */

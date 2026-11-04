@@ -8,9 +8,11 @@
  * 完全无关 —— 技能那边只关心「左侧显示哪棵树、右侧显示哪份正文」。混在
  * `NotesPanel` 里时，改技能最容易碰到编辑器。
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { MarkdownText, SegmentedControl, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives';
+import { CodeColorView } from './CodeColorView';
+import { defaultViewMode, isCodeFile, languageOf } from './codeColor';
 import type { NotesApi } from './api';
 import { indent, outdent } from './indent';
 import { isSkillFile, messageOf } from './paths';
@@ -43,29 +45,6 @@ export type ViewMode = 'split' | 'edit' | 'preview';
  */
 function isMarkdownTab(tab: NoteTab): boolean {
   return tab.kind === 'md' || tab.kind === 'global';
-}
-
-/**
- * 一个 tab 打开时应该用哪种显示方式。
- *
- * 非 Markdown（txt、外部文件、技能页）永远走编辑态：它们没有渲染概念，
- * 记下来的偏好不该影响它们。
- *
- * @param tab - 要打开的 tab。
- * @param store - 状态仓库，读 `mdViewMode` 偏好。
- * @returns 初始显示方式。
- */
-function defaultViewModeFor(tab: NoteTab, store: NotesStore): ViewMode {
-  if (!isMarkdownTab(tab)) return 'edit';
-  /*
-   * agent 指令文件永远从**编辑态**开始。
-   *
-   * 打开它的目的就是改规则；若沿用 md 的默认偏好（可能被设成「预览」），
-   * 用户点进来看到的是只读渲染，还得再切一次才能写。这类文件数量很少、
-   * 打开频率低，「每次都直接给编辑框」比「记住上次的方式」更有用。
-   */
-  if (tab.kind === 'global') return 'split';
-  return store.getSnapshot().mdViewMode;
 }
 
 /** 显示方式的可选项（供 SegmentedControl 使用）。 */
@@ -168,6 +147,60 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
   const [syncScroll, setSyncScroll] = useState(true);
 
   /**
+   * 这份内容能不能染色。
+   *
+   * 只有「整份文件都是代码」的类型才可以（`.sql`、`.java`…）；Markdown 的
+   * 代码块由 MarkdownText 自己处理，不归这条路。
+   */
+  const colorable = isCodeFile(tab.path);
+  /** 染色语言 id（`sql`、`java`…）。 */
+  const colorLanguage = languageOf(tab.path);
+  /**
+   * 当前是否正在染色。
+   *
+   * 两个条件同时成立：用户开了这个偏好，且这份文件是可染色的类型。
+   * 后者很重要 —— 偏好是全局的，但 `.md`/`.txt` 不该被它影响。
+   */
+  const [codeColor, setCodeColor] = useState(() => store.getSnapshot().codeColor && colorable);
+
+  /** 只有支持染色的文件才显示那个开关。 */
+  const canToggleColor = colorable;
+
+  /* ---------------- 染色叠加层 ----------------
+   *
+   * 染色**不是**只读预览，而是盖在编辑框之上的一层「着色显示」：
+   *   · 下面一层：CodeColorView 画出带颜色的文字；
+   *   · 上面一层：textarea 的文字设为全透明，只留光标与选区。
+   * 两层共用同一套字号/行高/内边距/制表符宽度，所以彩色文字和光标位置严丝合缝，
+   * 打字、选中、滚动、保存照常可用 —— 染色再也不会把文件变成只能看的图片。
+   *
+   * 为什么不让 textarea 自己上色：textarea 只能显示纯文本，这是浏览器的限制。
+   */
+  const paintRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 滚动同步用**位移**而不是 scrollTop。
+   *
+   * 两层的内容高度不可能分毫不差（编辑框有 border/内边距差异，着色层有行号列），
+   * 用 scrollTop 同步时，可滚动范围短的那一侧滚到底就停住，颜色会比光标落后
+   * 几十像素。平移没有「可滚动范围」这个概念，滚多少就移多少，永远严格相等。
+   */
+  const onPaintScroll = useCallback((event: { currentTarget: HTMLTextAreaElement }) => {
+    const paint = paintRef.current;
+    if (paint === null) return;
+    const { scrollLeft, scrollTop } = event.currentTarget;
+    paint.style.transform = `translate3d(${-scrollLeft}px, ${-scrollTop}px, 0)`;
+  }, []);
+  /**
+   * 输入法组字（打中文）期间临时撤掉着色层。
+   *
+   * 组字时文字是透明的，候选字看不见就成了瞎打；所以组字期间把 textarea 的
+   * 文字显示出来、并隐藏下面的着色层，组字结束再切回去。
+   */
+  const [composing, setComposing] = useState(false);
+
+
+
+  /**
    * Markdown 的显示方式。txt 没有渲染概念，永远是 edit，不受此状态影响。
    * - split：左编辑 + 右预览
    * - edit：只显示编辑框
@@ -179,7 +212,10 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
    * 面板里切换时走 `chooseView`，那里会同时更新偏好；而「打开另一个文件」时
    * EditorPane 会重新挂载（key 是 tab.id），因此自然读到最新的偏好。
    */
-  const [viewMode, setViewMode] = useState<ViewMode>(() => defaultViewModeFor(tab, store));
+  const [viewMode, setViewMode] = useState<ViewMode>(() =>
+    // 统一由 codeColor.ts 判定：染色时只能 preview，md 沿用偏好，其余编辑。
+    defaultViewMode(tab.kind, tab.path, store.getSnapshot().mdViewMode),
+  );
 
   /**
    * 切换显示方式，并把它记成默认。
@@ -206,9 +242,16 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
   const sync = useScrollSync(isMarkdownTab(tab) && viewMode === 'split' && syncScroll, rememberScroll);
   const draftRef = sync.editorRef;
 
-  /** 是否显示编辑框。 */
-  const showEditor = !isMarkdownTab(tab) || viewMode !== 'preview';
-  /** 是否显示渲染结果。 */
+  /**
+   * 是否显示编辑框。
+   *
+   * 染色的代码文件仍然显示编辑框 —— 染色是叠在它上面的一层着色，不是只读预览。
+   * 具体见上面「染色叠加层」的说明。
+   */
+  /** 是否走「编辑框 + 底下着色层」这条叠加渲染路径。 */
+  const paintCode = codeColor && !isMarkdownTab(tab);
+  const showEditor = !paintCode && (!isMarkdownTab(tab) || viewMode !== 'preview');
+  /** 是否显示渲染结果（Markdown 预览）。染色代码不走这里。 */
   const showPreview = isMarkdownTab(tab) && viewMode !== 'edit';
 
   // ---- 大纲 ----
@@ -430,6 +473,26 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
           </button>
         )}
 
+        {/* 代码染色开关：只在这个文件是可染色的代码类型时出现（.sql/.java/...）。
+            放在显示方式选择器左边 —— 那个选择器位置必须稳定，不能被挤动。
+            染色是叠在编辑框上的一层着色，开了照样能编辑。 */}
+        {canToggleColor && (
+          <button
+            type="button"
+            className={`dsh-notes__btn dsh-notes__btn--outline${codeColor ? ' dsh-notes__btn--on' : ''}`}
+            onClick={() => {
+              const next = !codeColor;
+              setCodeColor(next);
+              // 记成偏好，下次打开别的代码文件也直接用。
+              store.setCodeColor(next);
+            }}
+            title={codeColor ? '关闭代码染色（回到纯文本）' : '按语法给代码染色'}
+            aria-pressed={codeColor}
+          >
+            染色
+          </button>
+        )}
+
         {/* 显示方式：仅 markdown 需要（txt 没有渲染概念）。固定在最右端。 */}
         {isMarkdownTab(tab) && (
           <SegmentedControl
@@ -446,6 +509,36 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
       </div>
 
       <div className={`dsh-notes__body${showPreview && showEditor ? '' : ' dsh-notes__body--single'}`}>
+        {/* 染色叠加：下面着色层 + 上面透明文字的编辑框。
+            两层共用同一套排版，所以颜色和光标位置完全重合。 */}
+        {paintCode && (
+          <div className="dsh-notes__pane">
+            <div className={`dsh-notes__codewrap${composing ? ' dsh-notes__codewrap--composing' : ''}`}>
+              {/* 着色层：纯展示，不接收鼠标事件（否则会挡住编辑框的点击和选区）。 */}
+              <div className="dsh-notes__codepaint" aria-hidden="true">
+                <div ref={paintRef} className="dsh-notes__preview dsh-notes__preview--paint">
+                  {/* 这里**不能**用 MarkdownText —— 它会把 `#`、`|`、`*`
+                      当 Markdown 语法解析，代码会被改得面目全非。 */}
+                  <CodeColorView text={text} language={colorLanguage} />
+                </div>
+              </div>
+              <textarea
+                ref={draftRef}
+                className="dsh-notes__editor dsh-notes__editor--paint"
+                value={text}
+                spellCheck={false}
+                wrap="off"
+                placeholder=""
+                onChange={(event) => onChange(event.target.value)}
+                onKeyDown={onEditorKeyDown}
+                onScroll={onPaintScroll}
+                onCompositionStart={() => setComposing(true)}
+                onCompositionEnd={() => setComposing(false)}
+              />
+            </div>
+          </div>
+        )}
+
         {/* 编辑栏：txt 恒有；md 在「预览」模式下完全不渲染，省掉整块编辑区 */}
         {showEditor && (
           <div className="dsh-notes__pane">
@@ -462,7 +555,7 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
           </div>
         )}
 
-        {/* 预览栏：只有 markdown 才有；分栏时与编辑栏按比例同步滚动 */}
+        {/* 预览栏：Markdown 渲染。分栏时与编辑栏按比例同步滚动。 */}
         {showPreview && (
           <div className="dsh-notes__pane">
             <div ref={sync.previewRef} className="dsh-notes__preview" onScroll={sync.onPreviewScroll}>
