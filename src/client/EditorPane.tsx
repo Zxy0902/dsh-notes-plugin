@@ -163,9 +163,6 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
    */
   const [codeColor, setCodeColor] = useState(() => store.getSnapshot().codeColor && colorable);
 
-  /** 只有支持染色的文件才显示那个开关。 */
-  const canToggleColor = colorable;
-
   /* ---------------- 染色叠加层 ----------------
    *
    * 染色**不是**只读预览，而是盖在编辑框之上的一层「着色显示」：
@@ -184,17 +181,6 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
    * 用 scrollTop 同步时，可滚动范围短的那一侧滚到底就停住，颜色会比光标落后
    * 几十像素。平移没有「可滚动范围」这个概念，滚多少就移多少，永远严格相等。
    */
-  const onPaintScroll = useCallback(
-    (event: { currentTarget: HTMLTextAreaElement }) => {
-      const paint = paintRef.current;
-      if (paint === null) return;
-      const { scrollLeft, scrollTop } = event.currentTarget;
-      paint.style.transform = `translate3d(${-scrollLeft}px, ${-scrollTop}px, 0)`;
-      // 顺带记住位置：否则在染色状态下滚到一半就关染色，会跳回文件顶部。
-      rememberScroll(scrollTop);
-    },
-    [rememberScroll],
-  );
   /**
    * 输入法组字（打中文）期间临时撤掉着色层。
    *
@@ -245,19 +231,44 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
 
   /** 只有分栏时才需要同步滚动。 */
   const sync = useScrollSync(isMarkdownTab(tab) && viewMode === 'split' && syncScroll, rememberScroll);
+  /**
+   * 叠加编辑框滚动时：① 平移着色层；② 交给同步钩子记录位置、并在
+   * Markdown 分栏时把右侧渲染结果一起对齐。
+   */
+  const onPaintScroll = useCallback(
+    (event: { currentTarget: HTMLTextAreaElement }) => {
+      const paint = paintRef.current;
+      if (paint !== null) {
+        const { scrollLeft, scrollTop } = event.currentTarget;
+        paint.style.transform = `translate3d(${-scrollLeft}px, ${-scrollTop}px, 0)`;
+      }
+      // 位置记忆与分栏同步都在这里（enabled=false 时内部自动跳过同步）。
+      sync.onEditorScroll();
+    },
+    [sync],
+  );
   const draftRef = sync.editorRef;
 
   /**
-   * 是否显示编辑框。
+   * 这一份内容此刻“有没有源码栏可看”。
    *
-   * 染色的代码文件仍然显示编辑框 —— 染色是叠在它上面的一层着色，不是只读预览。
-   * 具体见上面「染色叠加层」的说明。
+   * Markdown 切到「预览」时完全没有编辑框，也就没有可染色的东西；
+   * 代码文件与 txt 永远有源码栏。
    */
-  /** 是否走「编辑框 + 底下着色层」这条叠加渲染路径。 */
-  const paintCode = codeColor && !isMarkdownTab(tab);
-  const showEditor = !paintCode && (!isMarkdownTab(tab) || viewMode !== 'preview');
-  /** 是否显示渲染结果（Markdown 预览）。染色代码不走这里。 */
+  const sourceVisible = !isMarkdownTab(tab) || viewMode !== 'preview';
+  /**
+   * 是否走「编辑框 + 底下着色层」这条叠加渲染路径。
+   *
+   * 只有代码文档会走到这里：Markdown 不在染色白名单里，`colorable` 为 false，
+   * 它的 `codeColor` 状态恒为 false（见 codeColor.ts 的 COLORABLE_LANGUAGES）。
+   */
+  const paintCode = codeColor;
+  /** 是否显示编辑框（染色时由叠加层接管，见上）。 */
+  const showEditor = !paintCode && sourceVisible;
+  /** 是否显示渲染结果（Markdown 预览）。 */
   const showPreview = isMarkdownTab(tab) && viewMode !== 'edit';
+  /** 只有代码文档才显示染色开关。 */
+  const canToggleColor = colorable;
 
   // ---- 大纲 ----
   /**
@@ -471,8 +482,11 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
         )}
 
         {/* 预览模式下不显示常规保存按钮，避免工具栏噪声；
-            但若切到预览时仍有未保存改动，保留一个保存入口，防止改动无处可存。 */}
-        {(!showEditor || dirty) && (
+            但若切到预览时仍有未保存改动，保留一个保存入口，防止改动无处可存。
+            【判据用 sourceVisible，不能用 showEditor】染色时编辑框由叠加层接管，
+            showEditor 为 false，用它会误判成“没有编辑框”，保存按钮就常驻工具栏了 ——
+            保存该由「有没有未保存改动」决定，与染色开关无关。 */}
+        {(!sourceVisible || dirty) && (
           <button
             type="button"
             className={`dsh-notes__btn${dirty ? ' dsh-notes__btn--primary' : ''}`}
@@ -533,7 +547,9 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
         )}
       </div>
 
-      <div className={`dsh-notes__body${showPreview && showEditor ? '' : ' dsh-notes__body--single'}`}>
+      {/* 两个栏是否并存：源码栏（普通编辑框 或 染色叠加层）＋ 渲染栏。
+          染色时 showEditor 为 false，但源码栏其实还在，不能据此判成单栏。 */}
+      <div className={`dsh-notes__body${sourceVisible && showPreview ? '' : ' dsh-notes__body--single'}`}>
         {/* 染色叠加：下面着色层 + 上面透明文字的编辑框。
             两层共用同一套排版，所以颜色和光标位置完全重合。 */}
         {paintCode && (

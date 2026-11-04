@@ -1,13 +1,13 @@
 /**
  * 代码染色（语法高亮）的判定逻辑。
  *
- * 【为什么单独成文件】它要回答两个问题，且都是纯判断、不碰 React：
- * 1. **这个文件该不该染色** —— 只有「整份文件就是一段代码」的文件才染
- *    （`.sql`、`.java`、`.py`…）；Markdown 里的代码块由 `MarkdownText`
+ * 【为什么单独成文件】它回答两个纯判断问题，不碰 React：
+ * 1. **这个文件该不该染色** —— 只有「代码文档」才染（`.sql`、`.java`、`.py`…），
+ *    而且该语言必须真的被 DSH 客户端染色器支持，否则会出现「有按钮没颜色」。
+ *    Markdown 不染：它用渲染预览看，Markdown 里的代码块由 `MarkdownText`
  *    自己处理，不归这里管。
- * 2. **当前该用哪种显示方式** —— 染色的打开与关闭是用户偏好，但「染了色的
- *    文件只能用预览显示」是硬约束（染色是把文本渲染成带样式的行，
- *    编辑框里没法染）。两者合成一个结果，避免界面各处各判一次。
+ * 2. **代码文件用哪种显示方式** —— 只有一个答案：编辑。染色是叠在编辑框上的
+ *    一层着色，不再是一种独立的「显示方式」。
  *
  * 依赖 `languageForPath`：那张扩展名表是 DSH 各处代码界面**共用**的同一份，
  * 用它就不会出现「这里认 .sql、那里不认」。
@@ -21,20 +21,55 @@
 import { languageForPath } from '@deepseek-ai/dsh-client-ui-primitives';
 
 /**
- * 一个文件是否属于「整份都是代码」的类型（可以染色）。
+ * 允许染色的语言白名单。
  *
- * 判据是 DSH 的共享扩展名表收不收它。表里没有的（`.md`、`.txt`、无扩展名
- * 的 `LICENSE`）一律不染色 —— 它们要么不是代码，要么染色没有意义。
+ * **为什么不用「DSH 扩展名表里有就染」**：那张表比客户端染色器的语法表
+ * 更大 —— 表里还有 `objective-c`、`solidity`、`zig`、`wasm`、`astro` 等，
+ * 而客户端根本没有对应语法。放行它们只会得到一个「点了没颜色」的死按钮。
  *
- * 注意 `.md` 也在这张表之外（Markdown 不是被当作代码渲染的表面），
- * 所以 Markdown 文件永远返回 false，符合预期。
+ * 所以这里反过来：只有「确实是代码文档」且「染色器真的能加载」的语言才放行。
+ * 表里没有的类型（`.txt`、无扩展名的 `LICENSE`）自然也不在其中。
+ *
+ * 刻意**不含** Markdown / MDX：它们用渲染预览看，再给源码上一套颜色只会
+ * 让人分不清当前是哪套（这版之前正是因此出现了「md 点染色没反应」）。
+ * 也不含 asciidoc / latex / bibtex / rst（文档排版格式）、csv / log / diff /
+ * http（流水与差异，分色收益低）。
+ *
+ * 维护提示：这份清单对应 primitives 里 LANG_ALIASES 的取值（即客户端真正
+ * 打包了的 60 个语法）。DSH 将来新增语法时，这里不跟着加只会「新类型暂不
+ * 染色」，不会出错；反过来凭扩展名表放行才会出现死按钮。
+ */
+const COLORABLE_LANGUAGES = new Set([
+  // 后端 / 脚本
+  'sql', 'java', 'python', 'kotlin', 'scala', 'groovy',
+  'c', 'cpp', 'csharp', 'go', 'rust', 'swift', 'dart',
+  'php', 'ruby', 'perl', 'lua', 'r', 'julia', 'nix',
+  // 前端 / 数据结构
+  'javascript', 'typescript', 'react', 'vue', 'svelte',
+  'html', 'css', 'scss', 'less', 'json', 'yaml', 'xml',
+  'toml', 'ini', 'proto', 'graphql', 'hcl',
+  // 函数式 / 其它
+  'haskell', 'elixir', 'erlang', 'clojure', 'fsharp', 'vb',
+  // 运维 / 构建
+  'shellscript', 'powershell', 'bat', 'makefile', 'cmake',
+  'verilog', 'system-verilog',
+]);
+
+/**
+ * 一个文件是否属于「可以染色的代码文档」。
+ *
+ * 两步：先用 DSH 的共享扩展名表把扩展名解析成语言 id（保证「.yml 和 .yaml
+ * 是同一种语言」这类判断与 DSH 各处一致），再用白名单确认它既属于代码、
+ * 染色器又确实支持。
  *
  * @param path - 文件名或路径（扩展名不区分大小写）。
  * @returns 可以染色则为 true。
  */
 export function isCodeFile(path: string | null): boolean {
   if (path === null || path === '') return false;
-  return languageForPath(path) !== undefined;
+  const language = languageForPath(path);
+  if (language === undefined) return false;
+  return COLORABLE_LANGUAGES.has(language);
 }
 
 /**
