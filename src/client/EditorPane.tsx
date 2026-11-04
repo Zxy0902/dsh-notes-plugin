@@ -184,12 +184,17 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
    * 用 scrollTop 同步时，可滚动范围短的那一侧滚到底就停住，颜色会比光标落后
    * 几十像素。平移没有「可滚动范围」这个概念，滚多少就移多少，永远严格相等。
    */
-  const onPaintScroll = useCallback((event: { currentTarget: HTMLTextAreaElement }) => {
-    const paint = paintRef.current;
-    if (paint === null) return;
-    const { scrollLeft, scrollTop } = event.currentTarget;
-    paint.style.transform = `translate3d(${-scrollLeft}px, ${-scrollTop}px, 0)`;
-  }, []);
+  const onPaintScroll = useCallback(
+    (event: { currentTarget: HTMLTextAreaElement }) => {
+      const paint = paintRef.current;
+      if (paint === null) return;
+      const { scrollLeft, scrollTop } = event.currentTarget;
+      paint.style.transform = `translate3d(${-scrollLeft}px, ${-scrollTop}px, 0)`;
+      // 顺带记住位置：否则在染色状态下滚到一半就关染色，会跳回文件顶部。
+      rememberScroll(scrollTop);
+    },
+    [rememberScroll],
+  );
   /**
    * 输入法组字（打中文）期间临时撤掉着色层。
    *
@@ -276,14 +281,34 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
    */
   const showOutline = hasOutline && store.getSnapshot().outlineOpen;
 
-  // 恢复上次的滚动位置（编辑器为主，恢复后再把预览对齐过去）。
-  useEffect(() => {
+  /**
+   * 把记住的滚动位置套到当前编辑框上，并让下面的着色层跟着对齐。
+   *
+   * 【为什么需要单独抽出来】切换「染色」会换掉整个编辑框元素（普通 textarea
+   * 与叠加层里的透明 textarea 不是同一个节点），新节点滚动位置是 0 ——
+   * 于是在一份长文件中间点一下染色，画面直接跳回文件顶部。
+   */
+  const applyScroll = useCallback((top: number) => {
     const node = draftRef.current;
-    if (node === null || props.initialScroll === 0) return;
-    node.scrollTop = props.initialScroll;
+    if (node === null || top === 0) return;
+    node.scrollTop = top;
+    const paint = paintRef.current;
+    if (paint !== null) {
+      paint.style.transform = `translate3d(${-node.scrollLeft}px, ${-node.scrollTop}px, 0)`;
+    }
+  }, []);
+
+  // 首次挂载：恢复上次的滚动位置（编辑器为主，恢复后同步钩子再对齐预览）。
+  useEffect(() => {
+    applyScroll(props.initialScroll);
     // 只在挂载时恢复一次；恢复后同步钩子会在下一次滚动时接管对齐。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 切换染色后（编辑框元素被替换）把位置补回去，避免跳回顶部。
+  useEffect(() => {
+    applyScroll(store.getSnapshot().scroll[tab.id] ?? 0);
+  }, [applyScroll, paintCode, store, tab.id]);
 
   /**
    * 保存：把草稿写回磁盘。
