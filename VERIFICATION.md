@@ -471,3 +471,17 @@ POST 写进 profile 且保留既有字段、7 类坏输入全部 400 且一次�
   推图标与路径，改了名字两者都会错（无扩展名会被当成 unknown 类型）。
 - 打开技能会**切换当前笔记文件夹**到技能自己的目录（围栏所限）。这是刻意的取舍，
   已写进代码注释与开发文档；若日后觉得打扰，可改为记住「上次的笔记根」并在离开技能时还原。
+
+**发布包完整性（真实打包 + 解包核对）**
+
+本地是 `link:` 安装，包缺文件在开发机上看不出来，所以这项必须真打包验证：
+- `node scripts/check-package.mjs`：用 `npm pack --dry-run --json` 取真实文件清单，
+  核对 `lib/index.js`、`lib/client.js` 里的每个相对导入都在清单内
+- 反向验证过它有效：把 `files` 退回旧的手写白名单，脚本以退出码 1 失败并明确指出
+  `lib/index.js → ./globalInstructions.js`（与线上报错一致），因此 `prepublishOnly`
+  会拦住这种包
+- 打包后解包再核对：`lib/globalInstructions.js` 存在，入口相对导入全部命中
+- 外部导入只允许已声明的依赖与 node 内置：实测为 `@deepseek-ai/cosmokit`、
+  `@deepseek-ai/schemastery` + `node:crypto/fs/fs-promises/os/path/url`
+- 文件数 45、其中 3 个 js（index / globalInstructions / client），未把
+  `lib/client/*.js`（tsc 中间产物，440KB）打进包

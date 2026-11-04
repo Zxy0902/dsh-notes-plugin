@@ -1,6 +1,6 @@
 {
   "name": "dsh-client-ui-notes",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "DSH 笔记插件：主面板阅读器 + 备忘录，支持 Markdown 左编右渲、代码语法染色、txt 编辑、文件树与置顶。",
   "type": "module",
   "main": "lib/index.js",
@@ -37,12 +37,9 @@
   ],
   "license": "MIT",
   "files": [
-    "lib/index.js",
-    "lib/index.js.map",
-    "lib/index.d.ts",
-    "lib/index.d.ts.map",
-    "lib/client.js",
-    "lib/client.js.map",
+    "lib/*.js",
+    "lib/*.map",
+    "lib/*.d.ts",
     "lib/client/**/*.d.ts",
     "cordis.patch.yml",
     "icon.svg",
@@ -88,5 +85,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.7.2"
+  },
+  "scripts": {
+    "prepublishOnly": "node scripts/check-package.mjs"
   }
 }
