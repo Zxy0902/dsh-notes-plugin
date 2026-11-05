@@ -19,7 +19,10 @@ import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:
 import { existsSync } from 'node:fs';
 import z from '@deepseek-ai/schemastery';
 import { isVolatile } from '@deepseek-ai/cosmokit';
-import { defaultAgentFilePath, isDefaultAgentFile, validateAgentFilePath } from './globalInstructions.js';
+// agent 指令那三个纯函数**必须按需加载**：静态 import 一旦缺文件，
+// 整个插件条目都会激活失败（连插件页的「更新」按钮一起消失，用户被锁死）。
+// 详见 agentInstructions.ts 的说明。
+import { loadAgentInstructions } from './agentInstructions.js';
 
 /** cordis 插件名（稳定标识）。 */
 export const name = 'notes';
@@ -2402,15 +2405,20 @@ export function makeRoutes(
     {
       kind: 'exact',
       path: ROUTES.globalInstructions,
-      handler: (req, res) => {
+      handler: async (req, res) => {
         if (!guard(req, res, 'GET')) return;
-        // 只回「DSH 默认会加载的那一条」。其余交给用户自己添加 ——
-        // 本插件是通用的，不替用户假设他还有哪些指令文件。
-        const path = defaultAgentFilePath();
-        writeJson(res, 200, {
-          ok: true,
-          defaultFile: { path, name: basename(path), exists: existsSync(path) },
-        });
+        try {
+          const { defaultAgentFilePath } = await loadAgentInstructions();
+          // 只回「DSH 默认会加载的那一条」。其余交给用户自己添加 ——
+          // 本插件是通用的，不替用户假设他还有哪些指令文件。
+          const path = defaultAgentFilePath();
+          writeJson(res, 200, {
+            ok: true,
+            defaultFile: { path, name: basename(path), exists: existsSync(path) },
+          });
+        } catch (error) {
+          fail(res, error);
+        }
       },
     },
 
@@ -2421,6 +2429,8 @@ export function makeRoutes(
       handler: async (req, res) => {
         if (!guard(req, res, 'GET')) return;
         try {
+          // 先确认 agent 指令模块可用（缺失时这里抛出可读原因，不影响插件其余部分）。
+          const { validateAgentFilePath, isDefaultAgentFile } = await loadAgentInstructions();
           const raw = query(req, 'path');
           if (raw === undefined || raw === '') throw new HttpError(400, 'expected ?path=<abs>');
 
@@ -2473,6 +2483,8 @@ export function makeRoutes(
       handler: async (req, res) => {
         if (!guard(req, res, 'POST')) return;
         try {
+          // 同上：模块缺失时只让这个接口不可用。
+          const { validateAgentFilePath, isDefaultAgentFile } = await loadAgentInstructions();
           const limit = maxWrite();
           const body = await readJsonBody(req, limit + 64 * 1024);
           if (body === null) throw new HttpError(400, 'invalid JSON body');

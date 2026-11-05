@@ -16,7 +16,7 @@
  * 用法：node scripts/check-package.mjs
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -74,8 +74,16 @@ function relativeTargets(source) {
 
 const packed = packedFiles();
 
-/** 待核对的本包模块：宿主入口 + 客户端 bundle。 */
-const entries = ['lib/index.js', 'lib/client.js'];
+/*
+ * 待核对的本包模块：lib 下**所有**顶层 js。
+ *
+ * 不写死成 index.js / client.js：以后新增宿主侧模块（例如 agentInstructions.js
+ * 这种按需加载的模块）会自动纳入核对，不会再出现「新模块的依赖没打进去」。
+ */
+const entries = readdirSync(join(root, 'lib'))
+  .filter((name) => name.endsWith('.js'))
+  .map((name) => `lib/${name}`)
+  .sort();
 const missing = [];
 
 for (const entry of entries) {

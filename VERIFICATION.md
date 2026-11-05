@@ -485,3 +485,14 @@ POST 写进 profile 且保留既有字段、7 类坏输入全部 400 且一次�
   `@deepseek-ai/schemastery` + `node:crypto/fs/fs-promises/os/path/url`
 - 文件数 45、其中 3 个 js（index / globalInstructions / client），未把
   `lib/client/*.js`（tsc 中间产物，440KB）打进包
+
+**缺文件降级（真实构造坏安装环境）**
+
+把 `lib/index.js`、`lib/agentInstructions.js`、`lib/client.js` 单独拷到一个目录、
+**故意不放** `globalInstructions.js`，再 `import()` 宿主入口：
+- ✅ 入口加载成功，导出了 `apply` / `inject` / `makeRoutes` 等 —— 插件可以激活
+- ✅ 调 `loadAgentInstructions()` 抛出可读原因（含「请重新安装或更新本插件」），
+  是普通异常而非未处理错误；二次调用稳定，不重复解析
+- ✅ 正常环境下同一函数返回三个纯函数，`defaultAgentFilePath()` 为 `~/.dsh/AGENTS.md`
+- ✅ 该路由失败时 `fail()` 回 500 + 文案；前端 `AgentFilesPane` 本就有 `.catch`
+  兜底（不显示默认项），面板不会崩
