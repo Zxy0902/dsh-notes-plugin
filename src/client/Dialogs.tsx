@@ -213,6 +213,14 @@ export interface ConfirmDialogProps {
   detail?: string;
   confirmLabel: string;
   danger?: boolean;
+  /**
+   * 可选的第二个动作，显示在「取消」与主按钮之间。
+   *
+   * 用于三选场景（如关闭未保存的标签页：保存并关闭 / 不保存 / 取消）。
+   * 不传就只有「取消 + 主按钮」两个，与历史行为一致。
+   */
+  secondaryLabel?: string;
+  onSecondary?: () => void;
   onCancel: () => void;
   onConfirm: () => void;
 }
@@ -242,6 +250,15 @@ export function ConfirmDialog(props: ConfirmDialogProps): JSX.Element {
           <button type="button" className="dsh-notes__btn" onClick={props.onCancel}>
             取消
           </button>
+          {props.secondaryLabel !== undefined && (
+            <button
+              type="button"
+              className="dsh-notes__btn dsh-notes__btn--danger"
+              onClick={props.onSecondary}
+            >
+              {props.secondaryLabel}
+            </button>
+          )}
           <button
             ref={confirmRef}
             type="button"

@@ -144,6 +144,14 @@ export type MdViewMode = 'split' | 'edit' | 'preview';
 /** 置顶区排版。 */
 export type PinLayout = 'one' | 'two';
 
+/**
+ * 关闭方式：单个 / 其他 / 右侧 / 全部。
+ *
+ * 界面在真正关闭前要用它预检「有哪些 tab 会被关、其中哪些还有未保存草稿」，
+ * 所以这四种方式必须和关闭实现走同一套规则（见 `idsForClose`）。
+ */
+export type CloseKind = 'one' | 'others' | 'right' | 'all';
+
 /** localStorage 键名（带版本，便于后续迁移）。 */
 const STORAGE_KEY = 'dsh.notes.v1';
 
@@ -615,24 +623,53 @@ export class NotesStore {
     this.commit({ ...this.state, tabs, activeTabId, drafts, scroll }, true);
   }
 
+  /**
+   * 按关闭方式算出要关掉的 tab id 集合。
+   *
+   * 单一来源：三个批量关闭方法与界面预检（`tabsToClose`）共用这套规则 ——
+   * 预检和实际关闭的集合一旦漂移，就会出现「提示说没有未保存内容、关下去却丢了
+   * 草稿」这种最难查的 bug。
+   */
+  private idsForClose(kind: CloseKind, id?: string): Set<string> {
+    const tabs = this.state.tabs;
+    if (kind === 'all') return new Set(tabs.map((tab) => tab.id));
+    if (id === undefined) return new Set();
+    if (kind === 'others') {
+      return new Set(tabs.filter((tab) => tab.id !== id).map((tab) => tab.id));
+    }
+    if (kind === 'right') {
+      const at = tabs.findIndex((tab) => tab.id === id);
+      return at < 0 ? new Set() : new Set(tabs.slice(at + 1).map((tab) => tab.id));
+    }
+    // one：只关自己；不在列表里就当没这回事。
+    return tabs.some((tab) => tab.id === id) ? new Set([id]) : new Set();
+  }
+
+  /**
+   * 预检：按关闭方式列出将被关闭的 tab。
+   *
+   * 界面用它先判断有没有未保存草稿；用户确认之后**仍调用原来的关闭方法**，
+   * 这样「关完落到哪个 tab」的语义只有 `closeTab` / `closeMany` 一处实现。
+   */
+  tabsToClose(kind: CloseKind, id?: string): NoteTab[] {
+    const ids = this.idsForClose(kind, id);
+    return this.state.tabs.filter((tab) => ids.has(tab.id));
+  }
+
   /** 关闭除 id 之外的全部 tab，并把 id 置为当前。 */
   closeOthers(id: string): void {
     if (!this.state.tabs.some((tab) => tab.id === id)) return;
-    const ids = new Set(this.state.tabs.filter((tab) => tab.id !== id).map((tab) => tab.id));
-    this.closeMany(ids, id);
+    this.closeMany(this.idsForClose('others', id), id);
   }
 
   /** 关闭 id 右侧的全部 tab。 */
   closeToRight(id: string): void {
-    const at = this.state.tabs.findIndex((tab) => tab.id === id);
-    if (at < 0) return;
-    const ids = new Set(this.state.tabs.slice(at + 1).map((tab) => tab.id));
-    this.closeMany(ids);
+    this.closeMany(this.idsForClose('right', id));
   }
 
   /** 关闭全部 tab。 */
   closeAll(): void {
-    this.closeMany(new Set(this.state.tabs.map((tab) => tab.id)));
+    this.closeMany(this.idsForClose('all'));
   }
 
   /** 聚焦一个 tab。 */

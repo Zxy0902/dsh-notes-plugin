@@ -18,11 +18,23 @@ import { TabStrip } from './TabStrip';
 import { SkillListPane } from './SkillListPane';
 import { SkillDetailPane } from './SkillPanes';
 import { SkillTreePane } from './SkillTreePane';
-import { MAX_PINNED, NotesStore, type NoteTab } from './store';
+import { MAX_PINNED, NotesStore, type CloseKind, type NoteTab } from './store';
 import { BREAKPOINTS, useElementWidth } from './useElementWidth';
 
 /** 技能目录页那个单例 tab 的固定 id（不用路径，因为它不是文件）。 */
 const SKILLS_TAB_ID = 'dsh-notes:skills';
+
+/** 待确认的关闭请求（有未保存草稿时才产生）。 */
+interface CloseRequest {
+  /** 关闭方式。 */
+  kind: CloseKind;
+  /** one / others / right 时对应的那个 tab；all 时为 undefined。 */
+  id?: string;
+  /** 会被关掉、且还有未保存草稿的 tab。 */
+  dirty: NoteTab[];
+  /** 正在保存：期间拒绝重复点击与取消。 */
+  saving: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // 面板组件
@@ -87,6 +99,13 @@ export function NotesPanel({
   const [menu, setMenu] = useState<{ entry: DirEntry; x: number; y: number } | null>(null);
   /** 待确认删除的条目；非 null 时显示确认弹层。 */
   const [pendingDelete, setPendingDelete] = useState<DirEntry | null>(null);
+
+  /**
+   * 待确认的关闭请求；非 null 时显示「保存并关闭 / 不保存 / 取消」三选。
+   *
+   * 只在这批 tab 里确实有未保存草稿时才出现，否则直接关，不多一次点击。
+   */
+  const [closeRequest, setCloseRequest] = useState<CloseRequest | null>(null);
 
   /** 正在行内重命名的条目路径；null 表示当前没有。 */
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
@@ -198,6 +217,93 @@ export function NotesPanel({
     setNotice(message);
     setTimeout(() => setNotice((current) => (current === message ? null : current)), 2400);
   }, []);
+
+  // -------------------------------------------------------------------------
+  // 关闭标签页前的未保存检查
+  //
+  // 关标签页是**唯一会真丢内容**的路径：`closeTab` 会连草稿一起删，而文件
+  // 从未写盘。关闭整个 DSH 不受影响 —— 草稿存在 localStorage 里，重开能恢复。
+  // -------------------------------------------------------------------------
+
+  /**
+   * 保存某个 tab 的草稿（「保存并关闭」用）。
+   *
+   * 规则与编辑器内那条保存路径一致（global 走专用通道、技能文件只读、
+   * 笔记文件受根目录围栏约束），但不推进编辑器内部的 loaded 基线 ——
+   * 这个 tab 马上要被关掉，那个组件也跟着消失，没必要再更新它。
+   *
+   * @returns true 表示可以继续关闭（已保存，或本来就没有草稿）。
+   */
+  const saveDraftForClose = useCallback(
+    async (tab: NoteTab): Promise<boolean> => {
+      const content = store.getSnapshot().drafts[tab.id];
+      if (content === undefined || tab.path === null) return true;
+      // 技能文件是只读的：没有可保存的去处，只能丢弃草稿。
+      if (tab.kind !== 'global' && isSkillFile(tab.path)) return true;
+      try {
+        if (tab.kind === 'global') await api.writeAgentFile(tab.path, content);
+        else await api.write(tab.root ?? state.root ?? '', tab.path, content, store.knownRoots());
+        store.clearDraft(tab.id);
+        return true;
+      } catch (cause) {
+        flash(`保存失败，未关闭：${messageOf(cause)}`);
+        return false;
+      }
+    },
+    [api, flash, state.root, store],
+  );
+
+  /** 真正执行关闭（未保存内容已处理完，或本来就没有）。 */
+  const runClose = useCallback(
+    (kind: CloseKind, id?: string) => {
+      if (kind === 'all') store.closeAll();
+      else if (id === undefined) return;
+      else if (kind === 'one') store.closeTab(id);
+      else if (kind === 'others') store.closeOthers(id);
+      else store.closeToRight(id);
+    },
+    [store],
+  );
+
+  /**
+   * 所有关闭入口的统一入口：先看要关的 tab 里有没有未保存草稿。
+   *
+   * 没有草稿就直接关（与历史行为一致，不多一次点击）；有才弹三选。
+   */
+  const requestClose = useCallback(
+    (kind: CloseKind, id?: string) => {
+      const dirty = store.tabsToClose(kind, id).filter((tab) => tab.id in state.drafts);
+      if (dirty.length === 0) {
+        runClose(kind, id);
+        return;
+      }
+      setCloseRequest({ kind, id, dirty, saving: false });
+    },
+    [runClose, state.drafts, store],
+  );
+
+  /** 「保存并关闭」：全部保存成功才关；任何一个失败就停住，别把没存上的内容关掉。 */
+  const confirmSaveAndClose = useCallback(async () => {
+    const request = closeRequest;
+    if (request === null || request.saving) return;
+    setCloseRequest({ ...request, saving: true });
+    for (const tab of request.dirty) {
+      if (!(await saveDraftForClose(tab))) {
+        setCloseRequest({ ...request, saving: false });
+        return;
+      }
+    }
+    setCloseRequest(null);
+    runClose(request.kind, request.id);
+  }, [closeRequest, runClose, saveDraftForClose]);
+
+  /** 「不保存，关闭」：丢弃草稿，直接关。 */
+  const confirmDiscardAndClose = useCallback(() => {
+    const request = closeRequest;
+    if (request === null || request.saving) return;
+    setCloseRequest(null);
+    runClose(request.kind, request.id);
+  }, [closeRequest, runClose]);
 
   // 问一次宿主本平台能不能删除，据此决定右键菜单里是否出现「删除」。
   // 探测失败就保持不支持：宁可不给入口，也不给一个点了会报错的入口。
@@ -841,10 +947,10 @@ export function NotesPanel({
                 if (id === SKILLS_TAB_ID) activateSkillsTab();
                 else store.activateTab(id);
               }}
-              onClose={(id) => store.closeTab(id)}
-              onCloseOthers={(id) => store.closeOthers(id)}
-              onCloseToRight={(id) => store.closeToRight(id)}
-              onCloseAll={() => store.closeAll()}
+              onClose={(id) => requestClose('one', id)}
+              onCloseOthers={(id) => requestClose('others', id)}
+              onCloseToRight={(id) => requestClose('right', id)}
+              onCloseAll={() => requestClose('all')}
               onCreate={() => setCreating(true)}
               showFolderToggle={narrow}
               onToggleFolder={() => void chooseFolder()}
@@ -867,7 +973,7 @@ export function NotesPanel({
                 onNotice={flash}
                 onRefresh={refreshSkills}
                 refreshing={skillsRefreshing}
-                onClose={() => store.closeTab(SKILLS_TAB_ID)}
+                onClose={() => requestClose('one', SKILLS_TAB_ID)}
                 agentFiles={state.agentFiles}
                 onOpenAgentFile={openAgentFile}
                 onAddAgentFile={(path) => store.addAgentFile(path)}
@@ -966,6 +1072,27 @@ export function NotesPanel({
               ? [{ label: '删除', danger: true, onPick: () => setPendingDelete(menu.entry) }]
               : []),
           ]}
+        />
+      )}
+
+      {/* 关闭未保存的标签页：三选。以前这一步是静默丢弃草稿，内容直接没了 */}
+      {closeRequest !== null && (
+        <ConfirmDialog
+          title="还有未保存的修改"
+          message={`${closeRequest.dirty
+            .slice(0, 3)
+            .map((tab) => tab.name)
+            .join('、')}${
+            closeRequest.dirty.length > 3 ? ` 等 ${String(closeRequest.dirty.length)} 个文件` : ''
+          } 尚未保存。`}
+          detail="「保存并关闭」会先把内容写入文件；「不保存」会丢弃这些修改，之后无法找回。"
+          confirmLabel={closeRequest.saving ? '保存中…' : '保存并关闭'}
+          secondaryLabel="不保存，关闭"
+          onSecondary={confirmDiscardAndClose}
+          onCancel={() => {
+            if (!closeRequest.saving) setCloseRequest(null);
+          }}
+          onConfirm={() => void confirmSaveAndClose()}
         />
       )}
 
