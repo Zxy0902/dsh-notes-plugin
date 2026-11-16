@@ -2063,65 +2063,6 @@ body[data-ds-dark-theme] .dsh-notes__codecolor {
 .dsh-notes__dialog-foot { display: flex; justify-content: flex-end; gap: 8px; }
 .dsh-notes__err { margin: -6px 0 12px; font-size: 11.5px; color: var(--dsw-alias-state-error-primary, #e5484d); }
 
-/* ---------------- 插件页上的「检查更新」控件 ----------------
-   这段控件渲染在 DSH 的插件详情页里，**不在 .dsh-notes 作用域内**，所以：
-   1) 顶部那条作用域限定的 box-sizing reset 管不到它，这里必须自己声明
-      box-sizing: border-box，否则按钮会因内边距而比设计宽出几像素；
-   2) 颜色仍然只用主题 token（--dsw-*），明暗主题自动跟随。 */
-.dsh-notes-update {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  box-sizing: border-box;
-}
-.dsh-notes-update__note {
-  box-sizing: border-box;
-  max-width: 420px;
-  font-size: 11.5px;
-  line-height: 1.4;
-  color: var(--dsw-alias-label-secondary);
-}
-.dsh-notes-update__btn {
-  box-sizing: border-box;
-  flex: 0 0 auto;
-  height: 24px;
-  padding: 0 9px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 6px;
-  background: var(--dsw-alias-bg-overlay);
-  color: var(--dsw-alias-label-primary);
-  font: inherit;
-  font-size: 11.5px;
-  cursor: pointer;
-}
-.dsh-notes-update__btn:hover:not(:disabled) {
-  border-color: var(--dsw-alias-border-l2);
-  color: var(--dsw-alias-label-primary);
-}
-/* 主按钮用官方那套配对 token（背景 + 前景会随主题反转），不要写死白色前景 */
-.dsh-notes-update__btn--primary {
-  border-color: var(--dsw-alias-button-primary-fill);
-  background: var(--dsw-alias-button-primary-fill);
-  color: var(--dsw-alias-label-primary-foreground);
-  font-weight: 600;
-}
-.dsh-notes-update__btn--primary:hover:not(:disabled) {
-  border-color: var(--dsw-alias-button-primary-hover);
-  background: var(--dsw-alias-button-primary-hover);
-  color: var(--dsw-alias-label-primary-foreground);
-}
-/* 危险动作（本地链接安装时仍要更新）：红字 + 透明底，与官方 Menu.danger 同款 */
-.dsh-notes-update__btn--danger {
-  border-color: var(--dsw-alias-state-error-primary, #e5484d);
-  background: transparent;
-  color: var(--dsw-alias-state-error-primary, #e5484d);
-  font-weight: 600;
-}
-.dsh-notes-update__btn--danger:hover:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-hover-danger, rgba(236, 19, 19, 0.05));
-}
-
 /* ---- 插件页里的配置面板 ---- */
 .dsh-notes__config {
   display: flex;

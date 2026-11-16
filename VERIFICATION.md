@@ -496,3 +496,40 @@ POST 写进 profile 且保留既有字段、7 类坏输入全部 400 且一次�
 - ✅ 正常环境下同一函数返回三个纯函数，`defaultAgentFilePath()` 为 `~/.dsh/AGENTS.md`
 - ✅ 该路由失败时 `fail()` 回 500 + 文案；前端 `AgentFilesPane` 本就有 `.catch`
   兜底（不显示默认项），面板不会崩
+
+**移除自带「检查更新 / 更新」按钮（0.1.24，官方能力已覆盖）**
+
+决策依据不是猜的 —— 读官方 `@deepseek-ai/dsh-client-ui-plugin-manager` 的实现核对过：
+
+- 官方插件页文案里已有完整流程：`版本`区块、`可更新到 {version}`、`已是最新版本`、
+  `新版本需要更新 DSH`（**版本兼容性拦截**）、`updateRestored`（装失败**自动回滚**原版本）、
+  `updateKept` / `updateBroken` / 安装输出。
+- 其宿主服务 `pluginManager` 提供 `listVersions(name)`（查已发布的更新版本）与
+  `updateBundle(name, version)`（装前校验「存在 / 声明 bundle / 兼容当前 DSH」，失败自动重装原版本）。
+- 本插件原先自建的那套是「查 npm latest-tag + `installBundle` 覆盖安装」：**没有兼容性校验**，
+  失败也没有回滚，两者都弱于官方。
+
+清理范围（约 700 行，全部只服务这一个功能）：
+
+- 客户端：`UpdateAction.tsx` 整文件 473 行；入口里 `plugins.detail.actions` 的 slot 注册与
+  `pluginManager` 快照；`api.latestVersion()`；`HostHealth.localInstall`；`.dsh-notes-update*` 8 处样式。
+- 宿主：`latestPublishedVersion()`、`latestCache` / `LATEST_TIMEOUT_MS`、`LatestVersion` 类型、
+  `ROUTES.latestVersion` 及其路由处理、`selfPackageName()`、`LOCAL_INSTALL`、health 响应里的 `localInstall`。
+- **保留** `pluginManager` 快照：它另有用途（本插件被卸载时清浏览器存储），
+  卸载清理逻辑（`notes: cleanup on uninstall`）经核对仍在，未随控件一起被删。
+
+验证方式与结果：
+
+- ✅ 产物零残留：`lib/client.js`、`lib/index.js` 中 grep `UpdateAction` / `检查更新` /
+  `latest-version` / `latestPublishedVersion` / `LOCAL_INSTALL` 全部 0 命中
+- ✅ 模块登记与产物**完全配对**：MODULES 唯一模块 25 个、产物定义 25 个；
+  无悬空 `__mod_X` 引用、无「登记了却没打包」、无「打包了却没登记」（这项直接对应历史上
+  `__mod_X is not defined` 那个坑）
+- ✅ bundle 体积 396.7 KB → **373.7 KB**
+- ✅ `tsc` 无报错；`node --check lib/client.js` 通过
+- ✅ 打包自检：48 个文件 / 其中 4 个 js，入口相对导入全部在包内
+
+踩到的坑（已记入 DEVELOPMENT.md）：删掉源文件后 `tsc` **不会**删除旧产物，
+`lib/client/UpdateAction.js` 仍在，而构建脚本读的正是 `lib/client/*.js`，
+于是死代码照旧被打进 bundle（第一次重建后体积没变、还能 grep 到旧模块名）。
+删模块必须同时：删源文件、摘掉 `MODULES` 登记、手动删 `lib/client/<模块>.*`。

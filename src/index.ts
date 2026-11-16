@@ -13,7 +13,6 @@
  */
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, normalize, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -172,134 +171,6 @@ function isLoopbackRequest(request: {
  * 反而更容易误判。所以 Windows 上直接不显示删除入口。
  */
 export const CAN_DELETE = process.platform !== 'win32';
-
-/**
- * 本插件当前是不是「本地目录链接」安装（profile 里写的是 `link:` / `file:`）。
- *
- * 判据：宿主自己的代码路径里有没有 `node_modules/dsh-client-ui-notes` 这一段。
- * npm / pnpm 装进 profile 时，真实路径一定落在
- * `.../node_modules/dsh-client-ui-notes/lib/index.js`（pnpm 经 `.pnpm/...` 中转，
- * 解析后同样含这一段）；而 `link:` 安装会把目录指向开发者自己的工程，路径里没有它。
- *
- * 只用于界面提示：本地链接安装时，插件页的「更新」会提示「会替换掉本地链接」。
- * 判断不出来时按「不是本地」处理 —— 宁可多显示一个按钮，也不能让正常安装的用户
- * 看不到更新入口。插件若被改名/复刻，这里就会判定为「不是本地」，也只是少一条提示。
- */
-const SELF_DIR = dirname(fileURLToPath(import.meta.url));
-const LOCAL_INSTALL = !/(^|[\\/])node_modules[\\/]dsh-client-ui-notes([\\/]|$)/.test(SELF_DIR);
-
-/** 取异常的一句话描述（宿主内多处要用同一套写法）。 */
-function messageOfError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * 本插件自己的 npm 包名（从自身 package.json 读，别写死）。
- *
- * 「检查更新」要知道去 npm 上查哪个包。读自己的 package.json 而不是硬编码，
- * 这样插件被改名/复刻后依旧查的是它自己。
- *
- * @returns 包名；读不到时返回 null（调用处给出可读错误）。
- */
-async function selfPackageName(): Promise<string | null> {
-  try {
-    const raw = await readFile(join(SELF_DIR, '..', 'package.json'), 'utf8');
-    const parsed = JSON.parse(raw) as { name?: unknown };
-    return typeof parsed.name === 'string' && parsed.name !== '' ? parsed.name : null;
-  } catch {
-    return null;
-  }
-}
-
-/** npm 上「最新版本」的查询结果。 */
-interface LatestVersion {
-  /** 包名。 */
-  name: string;
-  /** `latest` dist-tag 指向的版本。 */
-  version: string;
-  /**
-   * 该版本的 tarball 直链（npm 元数据里的 `dist.tarball`）。
-   *
-   * 「一键更新」必须用它，不能用 `包名@版本`：宿主一旦装了 HMR，`installBundle`
-   * 会在跑 pnpm 之前就以 `already-installed` 拒绝「spec 指明已安装包」的请求
-   * （0.2.1-rc.2 起）。tarball 规格解析不出包名，那道检查不触发；pnpm 的
-   * `minimumReleaseAge` 也只按 registry 版本判定，不作用于 URL 依赖。
-   */
-  tarball?: string;
-}
-
-/**
- * 最近一次查询结果与时间。
- *
- * 插件页每次打开都会自动查一次，加 5 分钟缓存避免反复打 npm；用户手动点
- * 「重新检查」时带 fresh 参数绕过缓存。
- */
-let latestCache: { at: number; value: LatestVersion } | null = null;
-
-/** 缓存有效期（毫秒）。 */
-const LATEST_CACHE_MS = 5 * 60 * 1000;
-
-/** 查询 npm 的超时（毫秒）。 */
-const LATEST_TIMEOUT_MS = 8000;
-
-/**
- * 查本插件在 npm 上的最新版本。
- *
- * 为什么不用插件管理服务的 `inspect`：那个接口是**安装前校验**，一旦这个包已经
- * 装进 profile 就会以 `already-installed` 拒绝（源码里是 `known.has(name)` 判重），
- * 拿它当「检查更新」用必然一进页面就失败。所以检查走这里直接问 npm 的
- * `latest` dist-tag；真正的升级仍交给官方 `installBundle`（它对已安装的包就是升级）。
- *
- * @param logger - 宿主 logger。
- * @param fresh - true 时绕过缓存。
- * @returns 包名与最新版本。
- * @throws HttpError 名称读不到（500）、网络失败（502）、返回体不可解析（502）。
- */
-async function latestPublishedVersion(logger: Logger, fresh: boolean): Promise<LatestVersion> {
-  const name = await selfPackageName();
-  if (name === null) throw new HttpError(500, '无法读出本插件自己的包名');
-
-  if (!fresh && latestCache !== null && Date.now() - latestCache.at < LATEST_CACHE_MS) {
-    return latestCache.value;
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}/latest`, {
-      headers: { accept: 'application/json' },
-      signal: AbortSignal.timeout(LATEST_TIMEOUT_MS),
-    });
-  } catch (error) {
-    logger.warn(error);
-    throw new HttpError(502, `无法访问 npm 查询最新版本：${messageOfError(error)}`);
-  }
-
-  if (!response.ok) {
-    throw new HttpError(502, `npm 返回 ${String(response.status)}，查询最新版本失败`);
-  }
-
-  let version: unknown;
-  let tarball: unknown;
-  try {
-    const body = (await response.json()) as { version?: unknown; dist?: { tarball?: unknown } };
-    version = body.version;
-    tarball = body.dist?.tarball;
-  } catch {
-    throw new HttpError(502, 'npm 返回的内容无法解析');
-  }
-  if (typeof version !== 'string' || version === '') {
-    throw new HttpError(502, 'npm 没有给出该包的版本号');
-  }
-
-  const value: LatestVersion = {
-    name,
-    version,
-    // 只接受 https 直链：客户端会把它交给 pnpm 当安装规格，来源必须可信。
-    ...(typeof tarball === 'string' && tarball.startsWith('https://') ? { tarball } : {}),
-  };
-  latestCache = { at: Date.now(), value };
-  return value;
-}
 
 /**
  * 系统回收站不可用时，在笔记根目录下使用的回退回收站目录名。
@@ -1680,7 +1551,6 @@ export const ROUTES = {
   move: '/api/dsh-notes/move',
   rename: '/api/dsh-notes/rename',
   health: '/api/dsh-notes/health',
-  latestVersion: '/api/dsh-notes/latest-version',
   skills: '/api/dsh-notes/skills',
   skillContent: '/api/dsh-notes/skill-content',
   readSkillFile: '/api/dsh-notes/read-skill-file',
@@ -2161,34 +2031,16 @@ export function makeRoutes(
         if (!guard(req, res, 'GET')) return;
         // canDelete 让客户端据此隐藏删除入口；服务端在删除路由里另有一道校验。
         // platform 供客户端选择跟随平台的文案（如「在访达中打开」/「打开文件所在位置」）。
-        // localInstall 告诉插件页的更新控件：当前是本地链接安装（更新会替换链接）。
         writeJson(res, 200, {
           ok: true,
           plugin: 'notes',
           home: homedir(),
           canDelete: CAN_DELETE,
           platform: process.platform,
-          localInstall: LOCAL_INSTALL,
           // 技能阅读开关：客户端据此决定是否显示入口（服务端另有一道 404 校验）。
           // 现读而不是快照 —— 用户在插件页一关，这个值立刻反映出来。
           skillsReading: skillsReading(),
         });
-      },
-    },
-
-    // ---- 查 npm 上的最新版本（插件页「检查更新」用）----
-    {
-      kind: 'exact',
-      path: ROUTES.latestVersion,
-      handler: async (req, res) => {
-        if (!guard(req, res, 'GET')) return;
-        try {
-          const fresh = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get('fresh') === '1';
-          const result = await latestPublishedVersion(logger, fresh);
-          writeJson(res, 200, { ok: true, ...result });
-        } catch (error) {
-          fail(res, error);
-        }
       },
     },
 

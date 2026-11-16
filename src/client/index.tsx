@@ -14,7 +14,6 @@ import { NotesApi } from './api';
 import { NotesPanel } from './NotesPanel';
 import { NotesStore } from './store';
 import { injectStyles } from './styles';
-import { NotesUpdateAction, type UpdateActionProps } from './UpdateAction';
 import {
   NS as CONFIG_NS,
   NotesConfigCard,
@@ -186,6 +185,16 @@ interface LayoutFacade {
   selectPanel?(id: string): void;
 }
 
+/**
+ * 插件管理服务的最小面（只取「订阅 + 读快照」两项）。
+ *
+ * 本插件用它判断「自己是不是被卸载了」——卸载后清掉浏览器里的遗留状态。
+ */
+interface PluginManagerFacade {
+  subscribe?(fn: () => void): () => void;
+  getSnapshot?(): unknown;
+}
+
 /** 客户端插件上下文。 */
 interface ClientContext {
   /** 槽位服务。 */
@@ -283,41 +292,29 @@ export function apply(ctx: ClientContext): void {
   }
 
   /**
-   * 插件管理服务快照（插件页的更新控件用）。
+   * 插件管理服务快照（「本插件被卸载时清理浏览器存储」用）。
    *
    * 【刻意不写进 inject】inject 是**加载期硬依赖**：声明了 `remote.pluginManager`
    * 之后，cordis 会等这个服务出现才加载本插件 —— 万一某个 DSH 版本或精简 profile
    * 没有插件管理器，本插件就会整个不加载（正是要避免的耦合）。
-   * 改用 `ctx.get()` 可选获取：拿不到就只是不显示更新按钮，其余功能照旧。
+   * 改用 `ctx.get()` 可选获取：拿不到只是不做卸载清理，其余功能照旧。
    */
-  let pluginManager: UpdateActionProps['manager'] = null;
+  let pluginManager: PluginManagerFacade | null = null;
   try {
     pluginManager =
-      (ctx.get?.('remote.pluginManager') as UpdateActionProps['manager']) ?? null;
+      (ctx.get?.('remote.pluginManager') as PluginManagerFacade | undefined) ?? null;
   } catch {
     pluginManager = null;
   }
   if (pluginManager === null) {
-    // 兜底一：直接问 remote 门面（若某版本把命名空间收进 fiber 作用域，
-    // 这条可能有效；未声明 inject 时会抛，已包住）。
+    // 兜底：直接问 remote 门面（若某版本把命名空间收进 fiber 作用域，这条可能有效）。
     try {
       const facade = ctx.remote as unknown as
-        | { pluginManager?: UpdateActionProps['manager'] }
+        | { pluginManager?: PluginManagerFacade }
         | undefined;
       pluginManager = facade?.pluginManager ?? null;
     } catch {
       pluginManager = null;
-    }
-  }
-  if (pluginManager === null) {
-    // 兜底二：留一行诊断，避免「更新入口为什么没出现」变成无从判断的问题。
-    // 只提示一次，且不进 UI —— 缺这个服务是旧版/精简环境下的正常降级。
-    try {
-      console.info(
-        '[notes] 未取到 remote.pluginManager，插件详情页的更新入口将不显示（其余功能不受影响）',
-      );
-    } catch {
-      // 控制台不可用就算了。
     }
   }
 
@@ -551,9 +548,7 @@ export function apply(ctx: ClientContext): void {
   // 做法：监听插件管理器的快照，一旦本插件从「已安装」列表里消失就清一次。
   // 只在**确定发生过卸载**时触发；正常启动/禁用/启用都不会误伤。
   ctx.effect(() => {
-    const manager = pluginManager as
-      | { subscribe?: (fn: () => void) => () => void; getSnapshot?: () => unknown }
-      | null;
+    const manager = pluginManager;
     if (typeof manager?.getSnapshot !== 'function' || typeof manager.subscribe !== 'function') {
       return () => {};
     }
@@ -707,57 +702,6 @@ export function apply(ctx: ClientContext): void {
     };
   }, 'notes: config page');
 
-  /**
-   * 6) 插件页上的「检查更新 / 更新」控件。
-   *
-   * 注册在 DSH 官方席位 `plugins.detail.actions` 上（插件详情页头部的控件区）。
-   * 该席位由 DSH 的插件管理器声明，只有它挂载时才存在 —— `slots.inject` 会自动
-   * 等它就绪；DSH 若删掉这个席位，这里只是不注册，不影响插件其余部分。
-   *
-   * 控件自己判断 subject：只有本插件的详情页才渲染，别的插件页返回 null。
-   */
-  ctx.effect(
-    () =>
-      ctx.slots.inject('plugins.detail.actions', () =>
-        ctx.slots.register(
-          {
-            name: 'plugins.detail.actions',
-            id: 'notes.update',
-            order: 50,
-            label: '笔记更新',
-            inject: (): Partial<UpdateActionProps> => ({
-              manager: pluginManager,
-              // 问宿主是不是本地链接安装：只用于提示，拿不到就当不是。
-              probeLocalInstall: async () => {
-                try {
-                  const info = await api.health();
-                  return info.localInstall === true;
-                } catch {
-                  return false;
-                }
-              },
-              /**
-               * 查 npm 上的最新版本 —— 走**本插件自己的宿主半边**，不用插件管理
-               * 服务的 `inspect`：后者是安装前校验，已安装的包会被它以
-               * `already-installed` 拒绝，当「检查更新」用必然一进页面就失败。
-               * 宿主返回它自己读出来的包名，插件改名/复刻也不会查错包。
-               */
-              checkLatest: async (fresh: boolean) => {
-                const result = await api.latestVersion(fresh);
-                // tarball 一并透传：升级靠它覆盖安装，`包名@版本` 会被带 HMR 的宿主拒绝。
-                return {
-                  name: result.name,
-                  version: result.version,
-                  tarball: result.tarball,
-                };
-              },
-            }),
-          },
-          NotesUpdateAction,
-        ),
-      ),
-    'notes: update action',
-  );
 }
 
 /** 便于测试与排查的导出。 */
