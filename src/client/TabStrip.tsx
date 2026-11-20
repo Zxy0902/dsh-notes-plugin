@@ -243,7 +243,7 @@ export function TabStrip(props: TabStripProps): JSX.Element {
               key={tab.id}
               data-tab-id={tab.id}
               className={`dsh-notes__tab${active ? ' dsh-notes__tab--active' : ''}${dragId === tab.id ? ' dsh-notes__tab--ghost' : ''}${dragId !== null ? ' dsh-notes__tab--dragging' : ''}`}
-              title={tab.path ?? tab.name}
+              data-tip={tab.name}
               role="button"
               tabIndex={0}
               style={orderIndex >= 0 ? { order: orderIndex } : undefined}
@@ -326,7 +326,7 @@ export function TabStrip(props: TabStripProps): JSX.Element {
                   type="button"
                   role="menuitem"
                   className={`dsh-notes__tablist-item${active ? ' dsh-notes__tablist-item--active' : ''}`}
-                  title={tab.path ?? tab.name}
+                  data-tip={tab.name}
                   onClick={() => {
                     props.onActivate(tab.id);
                     closeList();

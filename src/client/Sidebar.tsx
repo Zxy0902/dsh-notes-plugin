@@ -770,7 +770,7 @@ export function NotesSidebar(props: SidebarProps): JSX.Element {
                   type="button"
                   data-pin-path={path}
                   className={`dsh-notes__pin${path === activePath ? ' dsh-notes__pin--active' : ''}${path === pinDragging ? ' dsh-notes__pin--ghost' : ''}`}
-                  title={path}
+                  data-tip={basenameOf(path)}
                   style={order !== undefined ? { order } : undefined}
                   // 排序走指针事件（见 onPinMouseDown 上方说明），不用原生拖拽。
                   onMouseDown={(event) => onPinMouseDown(event, path)}
@@ -1319,7 +1319,7 @@ function TreeNode(props: TreeNodeProps): JSX.Element | null {
         className={`dsh-notes__node${active ? ' dsh-notes__node--active' : ''}${external ? ' dsh-notes__node--muted' : ''}`}
         // data-path 供「定位到当前文件」按路径找节点。
         data-path={entry.path}
-        title={external ? `${entry.path}（用系统默认程序打开）` : entry.path}
+        data-tip={external ? `${entry.name}（用系统默认程序打开）` : entry.name}
         role="button"
         tabIndex={0}
         // 可拖拽：拖到文件夹上即移动进去。不可阅读的文件也是真实文件，同样可移动。

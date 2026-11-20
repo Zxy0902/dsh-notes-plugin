@@ -747,6 +747,24 @@ html[data-platform='darwin'] .dsh-notes__dragband {
 }
 .dsh-notes__btn:disabled { opacity: .5; cursor: default; }
 
+/* 悬停提示：自绘气泡（原生 title 延迟 0.5 秒以上，Electron 里还常常不弹）。
+   fixed 定位，不参与布局；用等宽字体，长路径读起来更清楚。 */
+.dsh-notes__tip {
+  position: fixed;
+  z-index: 9999;
+  max-width: 420px;
+  padding: 5px 9px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-overlay);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-all;
+  pointer-events: none;
+}
+
 /* ---------------- 编辑区 ---------------- */
 
 /* 文档头 + 正文 + 状态栏 的定位容器：查找条以它为基准浮起，

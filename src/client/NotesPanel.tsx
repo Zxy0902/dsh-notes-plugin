@@ -219,6 +219,68 @@ export function NotesPanel({
   }, []);
 
   // -------------------------------------------------------------------------
+  // 悬停提示
+  //
+  // 文件树、置顶、标签栏里的名字经常被截断。原生 title 有 0.5 秒以上延迟，
+  // 在 Electron 里还经常不弹，所以改成自绘。
+  //
+  // 气泡直接挂在 document.body 上、监听也绑在 document 上：不放进 React 树，
+  // 就不受任何祖先的 transform / overflow / 定位影响（DSH 的面板外层有这些），
+  // 也不会因为组件重渲染而丢失。
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    const bubble = document.createElement('div');
+    bubble.className = 'dsh-notes__tip';
+    document.body.appendChild(bubble);
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const clear = (): void => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
+    const hide = (): void => {
+      clear();
+      bubble.style.display = 'none';
+      bubble.textContent = '';
+    };
+    const over = (event: PointerEvent): void => {
+      const holder = (event.target as HTMLElement | null)?.closest('[data-tip]');
+      const text = holder instanceof HTMLElement ? (holder.getAttribute('data-tip') ?? '') : '';
+      // 移到没有提示的位置，立刻收掉（不能等 pointerout：元素内移动也会触发）。
+      if (text === '') {
+        hide();
+        return;
+      }
+      if (bubble.style.display === 'block' && bubble.textContent === text) return;
+      clear();
+        const anchor = holder as HTMLElement;
+      timer = setTimeout(() => {
+        const rect = anchor.getBoundingClientRect();
+        bubble.textContent = text;
+        bubble.style.display = 'block';
+        // 先显示再量宽度，才知道右边界够不够。
+        const x = Math.max(8, Math.min(rect.left, window.innerWidth - bubble.offsetWidth - 8));
+        bubble.style.left = `${String(x)}px`;
+        bubble.style.top = `${String(rect.bottom + 6)}px`;
+      }, 280);
+    };
+
+    document.addEventListener('pointerover', over);
+    document.addEventListener('pointerdown', hide);
+    document.addEventListener('pointerleave', hide);
+    window.addEventListener('blur', hide);
+    return () => {
+      clear();
+      document.removeEventListener('pointerover', over);
+      document.removeEventListener('pointerdown', hide);
+      document.removeEventListener('pointerleave', hide);
+      window.removeEventListener('blur', hide);
+      bubble.remove();
+    };
+  }, []);
+
+
+  // -------------------------------------------------------------------------
   // 关闭标签页前的未保存检查
   //
   // 关标签页是**唯一会真丢内容**的路径：`closeTab` 会连草稿一起删，而文件
