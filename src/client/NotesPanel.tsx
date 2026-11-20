@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { NotesApi, type AgentInstructionFile, type DirEntry, type SkillSummary, type SkillTreeNode } from './api';
-import { basenameOf, dirnameOf, isSkillFile, messageOf, revealLabelOf } from './paths';
+import { basenameOf, dirnameOf, isSkillFile, messageOf, openKindFor, revealLabelOf } from './paths';
 import { IconFolder, IconSkill } from './icons';
 import { EditorPane } from './EditorPane';
 import { NotesSidebar } from './Sidebar';
@@ -397,13 +397,17 @@ export function NotesPanel({
     setSkillView(null);
   }, []);
 
-  /** 打开一个文件（点树或点置顶都会走这里）。 */
+  /**
+   * 打开文件树里的一个文件。
+   *
+   * 左键点击时 `Sidebar` 已经把不可阅读的文件分流给 `openExternally` 了，但
+   * **右键菜单的「打开」直接调本函数**，所以这里必须自己再判一次 —— 把判定统一
+   * 交给 `openKindFor`，任何入口都不会把 `.pdf`/`.xlsx` 塞进文本框。
+   */
   const openFile = useCallback(
     (entry: DirEntry) => {
-      const kind: 'md' | 'txt' =
-        entry.name.toLowerCase().endsWith('.md') || entry.name.toLowerCase().endsWith('.markdown')
-          ? 'md'
-          : 'txt';
+      // 符号链接（kind 为 other）一律按不可阅读处理，不跟随。
+      const kind = openKindFor(entry.name, entry.kind === 'file' ? entry.editable : false);
       // 用户主动打开了笔记：直接退出技能浏览，左右一起复位
       // （不能只等 effect —— 那个要等一帧，右侧会先闪一下技能正文）
       leaveSkill();
@@ -813,8 +817,9 @@ export function NotesPanel({
       // 名字必须走 basenameOf：Windows 上是反斜杠路径，只认 `/` 会把整串路径
       // 当成文件名（标签页标题因此显示全路径）。
       const name = basenameOf(path);
-      const lower = name.toLowerCase();
-      const kind: 'md' | 'txt' = lower.endsWith('.md') || lower.endsWith('.markdown') ? 'md' : 'txt';
+      // 置顶只存了路径，拿不到宿主的 editable，交给 openKindFor 按扩展名兜底 ——
+      // 否则把 .xlsx 置顶后点开，同样会把二进制塞进文本框。
+      const kind = openKindFor(name);
       // 置顶可能是切根之前放上去的，所以不能直接用当前根 —— 先问它属于哪个根。
       userLeftSkillRef.current = true;
       leaveSkill();
@@ -1027,11 +1032,17 @@ export function NotesPanel({
           y={menu.y}
           onClose={() => setMenu(null)}
           items={[
-            // 目录没有「打开」可言（点它就是展开/收起），也没有置顶与删除
-            // —— 那两个只对文件有意义。目录的菜单里只留「重命名」与「定位」。
-            ...(menu.entry.kind === 'directory'
-              ? []
-              : [{ label: '打开', onPick: () => openFile(menu.entry) }]),
+            // 目录没有「打开」可言（点它就是展开/收起）。
+            //
+            // 阅读器打不开的文件（.pdf/.xlsx/.docx 等）同样不给「打开」：点了只会
+            // 进一个「此格式无法在阅读器中打开」提示页，还要再点一次「用 XX 打开」，
+            // 等于多绕一步。左键点击本来就能到这个提示页，右键不必再重复一个入口。
+            ...(menu.entry.kind === 'file' && menu.entry.editable
+              ? [{ label: '打开', onPick: () => openFile(menu.entry) }]
+              : []),
+            // 目录没有置顶与删除 —— 那两个只对文件有意义，目录的菜单里只留
+            // 「重命名」与「定位」。
+            //
             // 技能文件（SKILL.md）属于 DSH 自己的资产，不是用户的笔记：
             // 置顶会把它混进「我的收藏」，删除更会直接破坏技能。两者都不给。
             ...(menu.entry.kind === 'directory' || isSkillFile(menu.entry.path)

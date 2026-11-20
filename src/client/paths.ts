@@ -99,3 +99,54 @@ export function messageOf(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
 }
+
+/**
+ * 明确不是文本的扩展名：命中就走「打开方式」提示页。
+ *
+ * 只在**拿不到宿主判定**时兜底用（比如从置顶区打开，那里只有路径）。
+ * 有 `editable` 时一律以宿主为准 —— 那是唯一真相，客户端不重复维护白名单。
+ */
+const NON_TEXT_EXTENSIONS = new Set([
+  // 文档与办公：容器是二进制或富文本，读进文本框只会是乱码
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+  '.pages', '.numbers', '.key', '.odt', '.ods', '.odp', '.rtf',
+  // 图片
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico',
+  '.tif', '.tiff', '.heic', '.heif', '.psd', '.ai', '.sketch', '.fig',
+  // 音视频
+  '.mp3', '.wav', '.flac', '.aac', '.m4a', '.ogg', '.opus',
+  '.mp4', '.mov', '.avi', '.mkv', '.webm', '.wmv', '.flv', '.m4v',
+  // 压缩包与镜像
+  '.zip', '.rar', '.7z', '.gz', '.tgz', '.bz2', '.xz', '.tar', '.dmg', '.iso',
+  // 可执行与库
+  '.exe', '.msi', '.dll', '.so', '.dylib', '.bin', '.class', '.jar', '.war',
+  '.pyc', '.o', '.a', '.lib', '.wasm',
+  // 数据库与字体
+  '.db', '.sqlite', '.sqlite3', '.mdb',
+  '.ttf', '.otf', '.woff', '.woff2', '.eot',
+]);
+
+/**
+ * 打开一个文件时该用哪种视图。
+ *
+ * 三种去向：
+ * - `md`：Markdown，左编右渲；
+ * - `txt`：文本，单栏编辑；
+ * - `external`：阅读器打不开，显示「此格式无法在阅读器中打开」+「打开方式」控件，
+ *   **绝不把二进制内容塞进文本框**。
+ *
+ * 所有「打开文件」的入口都必须经过这里，否则迟早出现某个入口（右键菜单、置顶区）
+ * 把 `.xlsx` 当纯文本打开 —— 这正是 issue #1 报的问题。
+ *
+ * @param name - 文件名（含扩展名）。
+ * @param readable - 宿主的 `editable` 判定。文件树条目一定带；只有路径、拿不到
+ *   条目时（如从置顶区打开）传 undefined，此时按扩展名兜底。
+ * @returns 应当使用的 tab kind。
+ */
+export function openKindFor(name: string, readable?: boolean): 'md' | 'txt' | 'external' {
+  const lower = name.toLowerCase();
+  if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'md';
+  // 有宿主判定就以它为准：白名单在宿主那边，客户端不复制一份。
+  if (readable !== undefined) return readable ? 'txt' : 'external';
+  return NON_TEXT_EXTENSIONS.has(splitName(name).ext.toLowerCase()) ? 'external' : 'txt';
+}

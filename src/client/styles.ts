@@ -681,6 +681,30 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   font-size: 11.5px;
   color: var(--dsw-alias-label-secondary);
 }
+/* 文档头里的纯图标按钮（查找）：与文字按钮同高，但只占 22px 宽。
+   图标用 currentColor，随主题走，不需要单独配色。 */
+.dsh-notes__iconbtn {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+.dsh-notes__iconbtn:hover {
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-notes__iconbtn[aria-expanded="true"] {
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+}
+
 .dsh-notes__docpath {
   flex: 1;
   min-width: 0;
@@ -724,8 +748,110 @@ html[data-platform='darwin'] .dsh-notes__dragband {
 .dsh-notes__btn:disabled { opacity: .5; cursor: default; }
 
 /* ---------------- 编辑区 ---------------- */
+
+/* 文档头 + 正文 + 状态栏 的定位容器：查找条以它为基准浮起，
+   这样不用把标签栏的高度算进来（那 38px 在本组件之外）。 */
+.dsh-notes__editorwrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .dsh-notes__body { flex: 1; min-height: 0; display: flex; }
-.dsh-notes__pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+/* 底部状态栏：字数这类辅助信息，低调地贴在内容区下方。
+   高度故意压到 20px 以内 —— 它是「顺手看一眼」的信息，不该抢正文的空间。 */
+.dsh-notes__statusbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  /* 一组靠右：查找入口与字数挨着，左侧留白反而让这一条显得干净。
+     20px 的高度太局促（像提示条而非可用控件），放到 26px 后按钮更好点。 */
+  justify-content: flex-end;
+  gap: 12px;
+  min-height: 26px;
+  padding: 0 14px;
+  font-size: 11.5px;
+  line-height: 1;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+}
+/* 查找条：正好盖住文档头那一行。
+   三种放法都试过：贴右上角显得挤在角落、居中会压住正文中间、浮在正文顶部会挡
+   第一段。文档头本来就是一条工具栏，让它暂时变成查找栏，既不遮正文也不偏，
+   位置还固定 —— 关闭后原样恢复。 */
+.dsh-notes__findbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 30px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-module-platform);
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-notes__findinput {
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  outline: none;
+  /* 浅底 + 聚焦描边：让这块明显是「可以打字的地方」，而不是条上的普通文字。 */
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+}
+.dsh-notes__findinput:focus { border-color: var(--dsw-alias-border-l2); }
+.dsh-notes__findinput::placeholder { color: var(--dsw-alias-label-tertiary); }
+.dsh-notes__findcount {
+  flex: 0 0 auto;
+  min-width: 52px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.dsh-notes__findbtn {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+.dsh-notes__findbtn:hover {
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+}
+/* 窄容器下把查找条收窄，别顶到边线 */
+.dsh-notes--narrow .dsh-notes__findbar { padding: 0 10px; }
+
+/* 预览区的匹配底色：用 CSS Custom Highlight API 上色，不改 DOM
+   （往 MarkdownText 的节点里插标记会破坏 React 对节点的所有权）。
+   半透明黄在明暗两套主题下都看得见，不需要分别定义。 */
+::highlight(dsh-notes-find) { background-color: rgba(255, 193, 7, 0.3); }
+::highlight(dsh-notes-find-active) { background-color: rgba(255, 152, 0, 0.62); }
+.dsh-notes__pane {
+  position: relative;   /* 查找命中块以它为基准绝对定位 */
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
 .dsh-notes__pane + .dsh-notes__pane { border-left: 1px solid var(--dsw-alias-border-l1); }
 
 
@@ -976,6 +1102,31 @@ html[data-platform='darwin'] .dsh-notes__dragband {
  * 没有别的办法。也不要改成 contenteditable —— 那会毁掉撤销、输入法和
  * ⌘S 那套现有逻辑。
  */
+/* 查找命中层：叠在编辑栏上（textarea 内部无法着色）。
+   配色与 Markdown 预览区一致 —— 全部匹配浅黄、当前那处深橙。
+   色块用文档坐标，滚动时整层平移（.dsh-notes__findlayer 的 transform），
+   逐个重算位置在大文件里会明显掉帧。 */
+.dsh-notes__finds {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 6;
+}
+.dsh-notes__findlayer {
+  position: absolute;
+  inset: 0;
+  will-change: transform;
+}
+.dsh-notes__findhit {
+  position: absolute;
+  border-radius: 2px;
+  background: rgba(255, 193, 7, 0.28);
+}
+.dsh-notes__findhit--active {
+  background: rgba(255, 152, 0, 0.62);
+}
+
 .dsh-notes__codewrap {
   position: relative;
   flex: 1;

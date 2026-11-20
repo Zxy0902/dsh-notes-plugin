@@ -8,7 +8,7 @@
  * 完全无关 —— 技能那边只关心「左侧显示哪棵树、右侧显示哪份正文」。混在
  * `NotesPanel` 里时，改技能最容易碰到编辑器。
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { MarkdownText, SegmentedControl, type MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives';
 import { CodeColorView } from './CodeColorView';
@@ -19,6 +19,8 @@ import { isSkillFile, messageOf } from './paths';
 import type { NoteTab, NotesStore } from './store';
 import { useScrollSync } from './useScrollSync';
 import { useOutline, OutlinePane } from './OutlinePane';
+import { IconSearch } from './icons';
+import { useFind } from './useFind';
 
 /** MarkdownText 要求的本地化标签（稳定引用，避免打断解析缓存）。 */
 const MARKDOWN_LABELS: MarkdownLabels = {
@@ -86,6 +88,21 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
   const dirty = draft !== undefined;
   const text = draft ?? loaded ?? '';
 
+  /**
+   * 正文字数（不计空白）。
+   *
+   * 口径是「去掉所有空白字符后的字符数」，而不是 `text.length`：换行与缩进
+   * 是排版不是内容，算进去会让同一个文件在不同缩进下显示出不同字数。
+   * 中文场景下这个数最接近「写了多少字」，英文则相当于字母数。
+   *
+   * emoji 等辅助平面字符在 UTF-16 里占两个码元，直接用 `.length` 会数成 2；
+   * 只在真的出现这类字符时才展开成码点数组，常见文本仍走 O(n) 的轻量路径。
+   */
+  const charCount = useMemo(() => {
+    const cleaned = text.replace(/\s/g, '');
+    return /[\uD800-\uDBFF][\uDC00-\uDFFF]/.test(cleaned) ? [...cleaned].length : cleaned.length;
+  }, [text]);
+
   // 打开 tab 时读文件（已有草稿则跳过，避免覆盖未保存内容）。
   useEffect(() => {
     if (tab.path === null) {
@@ -126,6 +143,8 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
       .finally(() => {
         if (alive) setLoading(false);
       });
+
+
 
     return () => {
       alive = false;
@@ -267,6 +286,32 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
   const showEditor = !paintCode && sourceVisible;
   /** 是否显示渲染结果（Markdown 预览）。 */
   const showPreview = isMarkdownTab(tab) && viewMode !== 'edit';
+
+  // 文档内查找。刻意不注册全局快捷键（会与快捷键类插件抢键），入口在文档头。
+  // 放在这里是因为要读 showPreview：分栏时编辑框与预览区都要处理。
+  const find = useFind({
+    text,
+    editorRef: sync.editorRef,
+    previewRef: sync.previewRef,
+    sourceVisible,
+    previewVisible: showPreview,
+  });
+
+
+  /** 命中层容器：跟着编辑框滚动整体平移。 */
+  const findLayerRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const editor = draftRef.current;
+    if (editor === null) return undefined;
+    const move = (): void => {
+      const layer = findLayerRef.current;
+      if (layer === null) return;
+      layer.style.transform = `translate3d(${String(-editor.scrollLeft)}px, ${String(-editor.scrollTop)}px, 0)`;
+    };
+    move();
+    editor.addEventListener('scroll', move);
+    return () => editor.removeEventListener('scroll', move);
+  }, [find.hits.length, showEditor, paintCode]);
   /** 只有代码文档才显示染色开关。 */
   const canToggleColor = colorable;
 
@@ -442,8 +487,38 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
     );
   }
 
+  /**
+   * 查找命中层：全部匹配浅色、当前那处深色 —— 与 Markdown 预览区的口径一致。
+   *
+   * textarea 内部不是 DOM，没法给文字上色，只能在它上面叠色块。色块用**文档
+   * 坐标**（行号 × 行高、canvas 量出的文字宽度），滚动偏移不逐块重算，而是把
+   * 整层平移 —— 同染色层的做法，几十上百处也不会随着滚动变卡。
+   */
+  const findLayer =
+    find.hits.length === 0 ? null : (
+      <div className="dsh-notes__finds" aria-hidden="true">
+        <div ref={findLayerRef} className="dsh-notes__findlayer">
+          {find.hits.map((hit, position) => (
+            <div
+              key={`${String(hit.top)}:${String(hit.left)}:${String(position)}`}
+              className={`dsh-notes__findhit${position === find.active ? ' dsh-notes__findhit--active' : ''}`}
+              style={{
+                top: `${String(hit.top)}px`,
+                left: `${String(hit.left)}px`,
+                width: `${String(hit.width)}px`,
+                height: `${String(hit.height)}px`,
+              }}
+            />
+          ))}
+        </div>
+      </div>
+    );
+
+
   return (
-    <>
+    // 包一层定位容器：查找条要相对「文档头正下方」绝对定位，
+    // 而上层 .dsh-notes__right 的顶部还有 38px 的标签栏，直接相对它算容易算错。
+    <div className="dsh-notes__editorwrap">
       <div className="dsh-notes__dochead">
         {/* 从技能列表打开的文件：最左边给一个明确的返回入口。 */}
         {props.backLabel !== undefined && props.onBack !== undefined && (
@@ -456,6 +531,17 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
             ← {props.backLabel}
           </button>
         )}
+        {/* 查找入口：放左侧、只用放大镜图标 —— 这是通用符号，不必占一行文字。
+            点下去就地展开成查找栏，鼠标不用上下跑。 */}
+        <button
+          type="button"
+          className="dsh-notes__iconbtn"
+          onClick={find.toggle}
+          aria-expanded={find.open}
+          title="在本文档中查找"
+        >
+          <IconSearch />
+        </button>
         <span className="dsh-notes__docpath" title={tab.path ?? tab.name}>
           {tab.path ?? tab.name}
         </span>
@@ -576,6 +662,7 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
                 onCompositionStart={() => setComposing(true)}
                 onCompositionEnd={() => setComposing(false)}
               />
+              {findLayer}
             </div>
           </div>
         )}
@@ -588,11 +675,19 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
               className="dsh-notes__editor"
               value={text}
               spellCheck={false}
+              // 与染色模式保持一致，同样不折行。
+              //
+              // 这里折行的话，「行号 × 行高」就不再等于视觉位置：一条超长行会
+              // 折成好几个视觉行，查找命中块从那一行之后全部偏位（之前就是这样
+              // 错的）。不折行还有个好处：代码、日志这类内容的缩进与对齐不会
+              // 被浏览器重排打乱，横向滚动比折行更接近用户对文本编辑器的预期。
+              wrap="off"
               placeholder={isMarkdownTab(tab) ? '开始写 Markdown…' : '开始写点什么…'}
               onChange={(event) => onChange(event.target.value)}
               onKeyDown={onEditorKeyDown}
               onScroll={sync.onEditorScroll}
             />
+            {findLayer}
           </div>
         )}
 
@@ -615,7 +710,53 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
           />
         )}
       </div>
-    </>
+
+      {/* 查找条：浮在阅读区右上角，不参与布局（父级 .dsh-notes__right 是定位基准）。
+          键盘只在输入框内响应，关闭后不监听任何按键。 */}
+      {find.open && (
+        <div className="dsh-notes__findbar" role="search">
+          <input
+            ref={find.inputRef}
+            className="dsh-notes__findinput"
+            value={find.query}
+            placeholder="查找…"
+            aria-label="在本文档中查找"
+            onChange={(event) => find.setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                if (event.shiftKey) find.prev();
+                else find.next();
+              } else if (event.key === 'Escape') {
+                event.preventDefault();
+                find.close();
+              }
+            }}
+          />
+          <span className="dsh-notes__findcount">
+            {find.query === '' ? '' : find.total === 0 ? '无结果' : `${String(find.current)} / ${String(find.total)}`}
+          </span>
+          <button type="button" className="dsh-notes__findbtn" onClick={find.prev} title="上一处（Shift+Enter）">
+            ↑
+          </button>
+          <button type="button" className="dsh-notes__findbtn" onClick={find.next} title="下一处（Enter）">
+            ↓
+          </button>
+          <button type="button" className="dsh-notes__findbtn" onClick={find.close} title="关闭（Esc）">
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* 底部状态栏：正文字数等辅助信息。
+          不放文档头：那里已经被路径、保存状态和四五个按钮占满，再塞东西会把
+          按钮挤得来回动（按钮宽度本来就不固定），视觉上也太吵。 */}
+      <div className="dsh-notes__statusbar">
+        <span className="dsh-notes__statuscount" title="正文字数，不计空白与换行">
+          {charCount.toLocaleString()} 字
+        </span>
+      </div>
+    </div>
   );
 }
 

@@ -43,6 +43,8 @@ const MODULES = [
   'lib/client/Dialogs.js',
   'lib/client/TabStrip.js',
   'lib/client/Panes.js',
+  // 文档内查找（⌘F 替代入口）：被 EditorPane 引用，必须排在它前面。
+  'lib/client/useFind.js',
   'lib/client/EditorPane.js',
   'lib/client/Sidebar.js',
   // agent 指令区（DSH 全局 AGENTS.md 的查看/编辑入口）。
