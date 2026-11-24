@@ -181,6 +181,8 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
    * 后者很重要 —— 偏好是全局的，但 `.md`/`.txt` 不该被它影响。
    */
   const [codeColor, setCodeColor] = useState(() => store.getSnapshot().codeColor && colorable);
+  /** 编辑框是否自动换行。全局偏好，见 store 的 wordWrap。 */
+  const [wordWrap, setWordWrap] = useState(() => store.getSnapshot().wordWrap);
 
   /* ---------------- 染色叠加层 ----------------
    *
@@ -286,6 +288,48 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
   const showEditor = !paintCode && sourceVisible;
   /** 是否显示渲染结果（Markdown 预览）。 */
   const showPreview = isMarkdownTab(tab) && viewMode !== 'edit';
+  /**
+   * 编辑框此刻是否自动换行。
+   *
+   * 三个条件缺一不可：
+   *   · 用户开着这个偏好（全局，默认开）；
+   *   · 当前**不是**染色视图 —— 着色层左边有行号列，折行后一条逻辑行会占好
+   *     几个视觉行，行号就和正文对不上了，颜色会串到别的行上。这是染色特有
+   *     的限制，退出染色立刻恢复折行；
+   *   · 编辑框真的显示着（Markdown 的「预览」模式没有编辑框，折行无从谈起）。
+   */
+  const wrapOn = wordWrap && !paintCode && showEditor;
+
+  /**
+   * 量出垂直滚动条的宽度，交给 CSS 补偿折行模式下的右边距。
+   *
+   * 为什么需要：折行后文字宽度 = clientWidth − 左右内边距，而 clientWidth 里
+   * 已经被垂直滚动条吃掉一条（悬浮式滚动条不占位，传统滚动条占 15px 左右）。
+   * 不补的话左边留 30px、右边只剩 15px，每一段折行文字都整体偏右。
+   *
+   * 只能用 JS 量：CSS 没有「滚动条宽度」这个值，各平台还不一样。
+   * 悬浮滚动条环境量到 0，样式上等于什么都没改。
+   */
+  useEffect(() => {
+    const node = draftRef.current;
+    if (node === null) return undefined;
+    const measure = (): void => {
+      // 编辑框 border 为 0，所以外框与内容盒的差就是滚动条宽度。
+      const bar = Math.max(0, node.offsetWidth - node.clientWidth);
+      const next = `${String(bar)}px`;
+      // 值没变就别写：ResizeObserver 回调里改样式容易触发循环告警。
+      if (node.style.getPropertyValue('--dsh-notes-scrollbar') === next) return;
+      node.style.setProperty('--dsh-notes-scrollbar', next);
+    };
+    measure();
+    // 内容从「不满一屏」长到「超过一屏」时滚动条才出现：外框尺寸不变，只有
+    // 内容盒变窄 —— ResizeObserver 盯的正是内容盒，能捕捉到这次变化。
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+    };
+  }, [draftRef, wrapOn, paintCode]);
 
   // 文档内查找。刻意不注册全局快捷键（会与快捷键类插件抢键），入口在文档头。
   // 放在这里是因为要读 showPreview：分栏时编辑框与预览区都要处理。
@@ -295,6 +339,7 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
     previewRef: sync.previewRef,
     sourceVisible,
     previewVisible: showPreview,
+    wrapped: wrapOn,
   });
 
 
@@ -311,7 +356,7 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
     move();
     editor.addEventListener('scroll', move);
     return () => editor.removeEventListener('scroll', move);
-  }, [find.hits.length, showEditor, paintCode]);
+  }, [find.hits.length, showEditor, paintCode, wrapOn]);
   /** 只有代码文档才显示染色开关。 */
   const canToggleColor = colorable;
 
@@ -501,7 +546,9 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
           {find.hits.map((hit, position) => (
             <div
               key={`${String(hit.top)}:${String(hit.left)}:${String(position)}`}
-              className={`dsh-notes__findhit${position === find.active ? ' dsh-notes__findhit--active' : ''}`}
+              /* 按 hit.match 判「当前那处」而不是按下标：折行时一处匹配可能
+                 拆成跨行的好几块，此时色块下标与匹配下标不再一致。 */
+              className={`dsh-notes__findhit${hit.match === find.active ? ' dsh-notes__findhit--active' : ''}`}
               style={{
                 top: `${String(hit.top)}px`,
                 left: `${String(hit.left)}px`,
@@ -654,6 +701,9 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
                 className="dsh-notes__editor dsh-notes__editor--paint"
                 value={text}
                 spellCheck={false}
+                /* 染色视图**永远不折行**，与上面的偏好无关：下面的着色层左边
+                   有一列行号（住在左边距里），折行后一条逻辑行会占好几个视觉
+                   行，行号就与正文错位、颜色串到别的行上。要折行就先关掉染色。 */
                 wrap="off"
                 placeholder=""
                 onChange={(event) => onChange(event.target.value)}
@@ -672,16 +722,18 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
           <div className="dsh-notes__pane">
             <textarea
               ref={draftRef}
-              className="dsh-notes__editor"
+              className={`dsh-notes__editor${wrapOn ? ' dsh-notes__editor--wrap' : ''}`}
               value={text}
               spellCheck={false}
-              // 与染色模式保持一致，同样不折行。
-              //
-              // 这里折行的话，「行号 × 行高」就不再等于视觉位置：一条超长行会
-              // 折成好几个视觉行，查找命中块从那一行之后全部偏位（之前就是这样
-              // 错的）。不折行还有个好处：代码、日志这类内容的缩进与对齐不会
-              // 被浏览器重排打乱，横向滚动比折行更接近用户对文本编辑器的预期。
-              wrap="off"
+              /* 折行用 `wrap="soft"`：只改显示，**不会**往文件里写换行符
+                 （`hard` 才会，那会把一个段落存成一堆短行，绝不能用）。
+                 断行规则见 styles.ts 的 `.dsh-notes__editor--wrap`。
+
+                 这里折行的话，「行号 × 行高」就不再等于视觉位置：一条超长行会
+                 折成好几个视觉行。所以查找命中的位置也跟着换算法 —— 折行时
+                 改用镜像层 + Range 让浏览器自己量（useFind 的
+                 measureWrappedHits），不会因为折行而偏位。 */
+              wrap={wrapOn ? 'soft' : 'off'}
               placeholder={isMarkdownTab(tab) ? '开始写 Markdown…' : '开始写点什么…'}
               onChange={(event) => onChange(event.target.value)}
               onKeyDown={onEditorKeyDown}
@@ -752,6 +804,43 @@ export function EditorPane(props: EditorPaneProps): JSX.Element {
           不放文档头：那里已经被路径、保存状态和四五个按钮占满，再塞东西会把
           按钮挤得来回动（按钮宽度本来就不固定），视觉上也太吵。 */}
       <div className="dsh-notes__statusbar">
+        {/* 换行开关：紧挨着字数，都是「看正文时顺手调一下」的辅助项。
+            不放文档头：那里已经有保存、染色、显示方式，再挤一个会把按钮推得
+            来回动。只在有编辑框时可点 —— 纯阅读模式没有可换行的东西，
+            代码染色时折行会让行号与正文错位。 */}
+        <button
+          type="button"
+          className={`dsh-notes__wrapbtn${wrapOn ? ' dsh-notes__wrapbtn--on' : ''}`}
+          disabled={paintCode || !showEditor}
+          aria-pressed={wrapOn}
+          title={
+            paintCode
+              ? '代码染色时不支持自动换行（行号会与正文错位），先关掉染色'
+              : !showEditor
+                ? '纯阅读模式没有编辑框，换行无从谈起'
+                : wrapOn
+                  ? '自动换行：已开启（只影响显示，不会往文件里写换行符），点击改为不换行'
+                  : '自动换行：已关闭，长行靠横向滚动查看，点击开启'
+          }
+          onClick={() => {
+            const next = !wordWrap;
+            setWordWrap(next);
+            store.setWordWrap(next);
+            /*
+             * 折行状态一变，同一个 scrollTop 对应的内容位置就变了（折行后
+             * 内容更矮/更高），画面会莫名其妙飘走。等布局生效后把光标重新
+             * 滚进视野 —— 用户眼睛刚才停在光标附近，这样才「还在原地」。
+             * 放 rAF 里是因为此刻新布局还没算完。
+             */
+            requestAnimationFrame(() => {
+              const node = draftRef.current;
+              if (node === null) return;
+              node.setSelectionRange(node.selectionStart, node.selectionEnd);
+            });
+          }}
+        >
+          换行
+        </button>
         <span className="dsh-notes__statuscount" title="正文字数，不计空白与换行">
           {charCount.toLocaleString()} 字
         </span>

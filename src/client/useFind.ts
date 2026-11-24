@@ -1,9 +1,11 @@
 /**
- * 量出**每一处**匹配在编辑框里的位置（文档坐标，不含滚动偏移）。
+ * 量出**每一处**匹配在编辑框里的位置（文档坐标，不含滚动偏移）——
+ * **不折行**时用这一支。
  *
  * textarea 内部不是 DOM，没法给某几个字上色，只能在它上面叠色块。
- * 编辑框是 `wrap="off"`（不折行），所以坐标是确定的：纵向 = 行号 × 行高，
- * 横向 = 该行前缀的文字宽度（canvas 量，CJK 与西文不同宽也能量准）。
+ * 不折行时坐标是确定的：纵向 = 行号 × 行高，横向 = 该行前缀的文字宽度
+ * （canvas 量，CJK 与西文不同宽也能量准）。
+ * 折行时这套算法不成立，改走 measureWrappedHits。
  *
  * 返回**文档坐标**，滚动偏移交给渲染层整体平移 —— 那样滚动一次不必把
  * 几十上百处位置全部重算。
@@ -39,12 +41,13 @@ function measureEditorHits(
     ctx.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
   }
 
-  return matches.map((match) => {
+  // canvas 量不出制表符的宽度（会当成 0），而编辑框的 tab-size 是 2 ——
+  // 按两个空格折算，缩进用 tab 的文件才不会整行左移。
+  const expandTabs = (raw: string): string => raw.replace(/\t/g, '  ');
+
+  return matches.map((match, position) => {
     const line = lineOf(match.start);
     const lineStart = lineStarts[line];
-    // canvas 量不出制表符的宽度（会当成 0），而编辑框的 tab-size 是 2 ——
-    // 按两个空格折算，缩进用 tab 的文件才不会整行左移。
-    const expandTabs = (raw: string): string => raw.replace(/\t/g, '  ');
     const offsetX = ctx === null ? 0 : ctx.measureText(expandTabs(text.slice(lineStart, match.start))).width;
     const wordWidth = ctx === null ? 0 : ctx.measureText(expandTabs(text.slice(match.start, match.end))).width;
     return {
@@ -53,8 +56,141 @@ function measureEditorHits(
       // 至少 4px，避免零宽匹配（如 ^）时看不见。
       width: Math.max(4, wordWidth),
       height: lineHeight,
+      match: position,
     };
   });
+}
+
+/**
+ * 自动换行时怎么量位置：镜像层 + Range。
+ *
+ * 一旦折行，「行号 × 行高」就彻底失效了 —— 一条逻辑行会占好几个视觉行，而
+ * 匹配可能落在其中任何一个视觉行的中间。位置只能让浏览器自己算：拿一个和
+ * 编辑框**同字体、同行高、同折行规则、内容宽度完全相等**的隐藏 div 排同一份
+ * 文本，再用 Range 圈出每一处匹配、读 `getClientRects()`。
+ *
+ * 这是 textarea 定位的通用做法（`textarea-caret-position` 一类库都是这个思路）。
+ * textarea 内部不是 DOM，没有第二种办法问出「第 N 个字画在哪儿」。
+ *
+ * 宽度必须取编辑框的**内容宽度**：`clientWidth` 已扣掉垂直滚动条与边框，
+ * 再减左右内边距。差 1px 就可能让镜像在另一个字处折行，后面整段偏位。
+ */
+function measureWrappedHits(
+  editor: HTMLTextAreaElement,
+  text: string,
+  matches: MatchRange[],
+): HitBox[] {
+  const style = getComputedStyle(editor);
+  const padTop = Number.parseFloat(style.paddingTop) || 0;
+  const padLeft = Number.parseFloat(style.paddingLeft) || 0;
+  const padRight = Number.parseFloat(style.paddingRight) || 0;
+  const lineHeight = Number.parseFloat(style.lineHeight) || 21.875;
+  const innerWidth = editor.clientWidth - padLeft - padRight;
+  // 编辑框此刻不可见（如 Markdown 切到纯预览）时量不出宽度，交给调用方保底。
+  if (innerWidth <= 0 || matches.length === 0) return [];
+
+  const mirror = document.createElement('div');
+  mirror.setAttribute('aria-hidden', 'true');
+  /*
+   * 逐项显式声明折行规则，**不靠继承、也不靠浏览器默认值**：
+   * 镜像与编辑框的断行点必须逐字一致，任何一条不同（比如默认的
+   * `hyphens`、或父级的 `word-break`）都会让某一处提前/推迟折行。
+   * 三个属性对应的规则见 styles.ts 的 `.dsh-notes__editor--wrap` 注释。
+   */
+  Object.assign(mirror.style, {
+    position: 'fixed',
+    left: '0',
+    top: '0',
+    margin: '0',
+    border: '0',
+    padding: '0',
+    boxSizing: 'content-box',
+    width: `${String(innerWidth)}px`,
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'break-word',
+    wordBreak: 'normal',
+    lineBreak: 'normal',
+    hyphens: 'manual',
+    fontFamily: style.fontFamily,
+    fontSize: style.fontSize,
+    fontWeight: style.fontWeight,
+    fontStyle: style.fontStyle,
+    fontVariant: style.fontVariant,
+    letterSpacing: style.letterSpacing,
+    wordSpacing: style.wordSpacing,
+    lineHeight: style.lineHeight,
+    tabSize: style.tabSize,
+    textIndent: style.textIndent,
+    textTransform: style.textTransform,
+    // 挪出视口但**不能**用 display:none / visibility:hidden 之外的隐藏方式：
+    // 不参与排版就量不到任何矩形。这里用位移，元素照常排版。
+    transform: 'translateX(-200vw)',
+  });
+  mirror.textContent = text;
+  document.body.appendChild(mirror);
+
+  const out: HitBox[] = [];
+  try {
+    const node = mirror.firstChild;
+    if (!(node instanceof Text)) return out;
+    const mirrorRect = mirror.getBoundingClientRect();
+
+    for (let position = 0; position < matches.length; position += 1) {
+      const match = matches[position];
+      const range = document.createRange();
+      range.setStart(node, match.start);
+      range.setEnd(node, match.end);
+      const rects = range.getClientRects();
+
+      if (rects.length === 0) {
+        // 纯空白匹配（搜一个空格）量不出矩形，退化成 4px 的小标记 ——
+        // 至少让用户看见「这里有一处」，否则计着数却哪儿都没有。
+        const point = document.createRange();
+        point.setStart(node, match.start);
+        point.collapse(true);
+        const rect = point.getBoundingClientRect();
+        out.push({
+          top: padTop + (rect.top - mirrorRect.top),
+          left: padLeft + (rect.left - mirrorRect.left),
+          width: 4,
+          height: lineHeight,
+          match: position,
+        });
+        continue;
+      }
+
+      // 一处匹配跨了视觉行就会返回多个矩形，每个都画一块。
+      for (const rect of rects) {
+        out.push({
+          top: padTop + (rect.top - mirrorRect.top),
+          left: padLeft + (rect.left - mirrorRect.left),
+          width: Math.max(4, rect.width),
+          height: rect.height > 0 ? rect.height : lineHeight,
+          match: position,
+        });
+      }
+    }
+  } finally {
+    mirror.remove();
+  }
+  return out;
+}
+
+/**
+ * 按当前折行状态选测量方式。
+ *
+ * 不折行时走 canvas —— 比镜像排版快得多，而且坐标是算出来的、不会因为
+ * 布局抖动而变；只有折行才不得不把排版交给浏览器。
+ */
+function measureHits(
+  editor: HTMLTextAreaElement,
+  text: string,
+  matches: MatchRange[],
+  wrapped: boolean,
+): HitBox[] {
+  return wrapped
+    ? measureWrappedHits(editor, text, matches)
+    : measureEditorHits(editor, text, matches);
 }
 
 
@@ -130,6 +266,14 @@ interface HitBox {
   left: number;
   width: number;
   height: number;
+  /**
+   * 这一块属于第几处匹配。
+   *
+   * 折行时**一处匹配可能拆成好几块**（命中跨了视觉行），所以色块数组的下标
+   * 不再等于匹配下标 —— 渲染层判断「当前那处」必须看这个字段，
+   * 而不能按下标比。
+   */
+  match: number;
 }
 
 /**
@@ -157,8 +301,9 @@ function findAll(text: string, query: string): MatchRange[] {
 /**
  * 把编辑框滚到匹配处并选中。
  *
- * textarea 设置选区后浏览器**不会**自动滚动，所以位置得手算：行号靠数换行
- * （一行内容再长也只占一行），行高乘行号就是偏移。
+ * textarea 设置选区后浏览器**不会**自动滚动，所以位置得手算。给了 `hit`
+ * （折行时由镜像层量出的真实位置）就直接用；否则退回「行号 × 行高」——
+ * 那只在**不折行**时成立，一行内容再长也只占一行。
  *
  * **绝对不要在这里 `editor.focus()`。** 查找框才是当前交互目标，一旦把焦点
  * 交给编辑器，用户敲的第二个字就会进正文 —— 表现为「第一个字进了搜索框，
@@ -168,13 +313,24 @@ function findAll(text: string, query: string): MatchRange[] {
  * 不用 focus 还有个副作用要防：`focus()` 会把「当时的光标」滚进视野并覆盖
  * scrollTop，所以顺序必须是**先选区、后设 scrollTop**，否则滚动会被重置。
  */
-function revealInEditor(editor: HTMLTextAreaElement, text: string, range: MatchRange): void {
-  const lineIndex = text.slice(0, range.start).split('\n').length - 1;
-  const style = getComputedStyle(editor);
-  const lineHeight = Number.parseFloat(style.lineHeight) || 21.875;
-  const padTop = Number.parseFloat(style.paddingTop) || 0;
+function revealInEditor(
+  editor: HTMLTextAreaElement,
+  text: string,
+  range: MatchRange,
+  hit: HitBox | undefined,
+): void {
   editor.setSelectionRange(range.start, range.end);
-  editor.scrollTop = Math.max(0, padTop + lineIndex * lineHeight - editor.clientHeight / 3);
+  let top: number;
+  if (hit !== undefined) {
+    // 折行时唯一可靠的位置来源：镜像层量出来的文档坐标。
+    top = hit.top;
+  } else {
+    const style = getComputedStyle(editor);
+    const lineHeight = Number.parseFloat(style.lineHeight) || 21.875;
+    const padTop = Number.parseFloat(style.paddingTop) || 0;
+    top = padTop + (text.slice(0, range.start).split('\n').length - 1) * lineHeight;
+  }
+  editor.scrollTop = Math.max(0, top - editor.clientHeight / 3);
 }
 
 /** 预览区里的一个文本节点，以及它在「拼接全文」中的区间。 */
@@ -275,6 +431,13 @@ export interface UseFindOptions {
    * 预览区给高亮。只按「sourceVisible」二分会漏掉预览那边的高亮。
    */
   previewVisible: boolean;
+  /**
+   * 编辑框当前是否自动换行。
+   *
+   * 折行会改变「第 N 个字画在哪儿」，所以位置测量与滚动定位都要跟着换算法，
+   * 切换时也得整批重算。
+   */
+  wrapped: boolean;
 }
 
 /**
@@ -284,7 +447,7 @@ export interface UseFindOptions {
  * 干扰 DSH 其他区域的 ⌘F。
  */
 export function useFind(options: UseFindOptions): FindController {
-  const { text, editorRef, previewRef, sourceVisible, previewVisible } = options;
+  const { text, editorRef, previewRef, sourceVisible, previewVisible, wrapped } = options;
 
   const [open, setOpen] = useState(false);
   const [query, setQueryState] = useState('');
@@ -376,10 +539,13 @@ export function useFind(options: UseFindOptions): FindController {
       setHits([]);
       return;
     }
-    revealInEditor(editor, text, match);
+    const position = Math.min(index, matches.length - 1);
     // 一次算完全部命中；滚动偏移由渲染层整体平移，这里不再监听 scroll。
-    setHits(measureEditorHits(editor, text, matches));
-  }, [open, index, matches, sourceVisible, text, editorRef]);
+    const boxes = measureHits(editor, text, matches, wrapped);
+    // 折行时一处匹配可能拆成多块，取它的第一块来定位滚动。
+    revealInEditor(editor, text, match, boxes.find((box) => box.match === position));
+    setHits(boxes);
+  }, [open, index, matches, sourceVisible, text, editorRef, wrapped]);
 
   /**
    * 预览区：全部匹配上浅色、当前那处上深色，并滚过去。

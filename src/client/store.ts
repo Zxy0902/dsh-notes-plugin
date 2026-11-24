@@ -98,6 +98,15 @@ export interface NotesState {
    */
   outlineOpen: boolean;
   /**
+   * 编辑框是否自动换行（软换行：只改显示，**不往文件里写 `\n`**）。
+   *
+   * 全局偏好，默认**开** —— 默认不折行时长句子会一路向右顶、只留一条横向
+   * 滚动条，写笔记的人第一反应是「文字跑没了」。代码类文件同理，折行与否
+   * 由用户自己切；但代码染色开着时强制不折行（着色层有行号列，折行会让
+   * 行号与正文对不上，见 EditorPane）。
+   */
+  wordWrap: boolean;
+  /**
    * 置顶区排版：`one` 单栏（每项一行，文件名完整可读）或 `two` 双栏（省空间）。
    * 默认 `two`（与历史行为一致）。
    */
@@ -169,6 +178,7 @@ function emptyState(): NotesState {
     fileVisibility: 'editable',
     mdViewMode: 'split',
     outlineOpen: true,
+    wordWrap: true,
     codeColor: false,
     pinLayout: 'two',
     agentFiles: [],
@@ -246,6 +256,8 @@ function reviveState(raw: unknown): NotesState {
       input.mdViewMode === 'edit' ? 'edit' : input.mdViewMode === 'preview' ? 'preview' : 'split',
     // 旧数据没有这个字段：默认展开（大多数人第一次就想要目录）。
     outlineOpen: input.outlineOpen !== false,
+    // 旧数据没有这个字段：默认折行（不折行的长行会向右顶出去，见字段说明）。
+    wordWrap: input.wordWrap !== false,
     // 旧数据没有这个字段：默认关（见字段说明）。
     codeColor: input.codeColor === true,
     pinLayout: input.pinLayout === 'one' ? 'one' : 'two',
@@ -453,6 +465,17 @@ export class NotesStore {
   setOutlineOpen(open: boolean): void {
     if (this.state.outlineOpen === open) return;
     this.commit({ ...this.state, outlineOpen: open }, true);
+  }
+
+  /**
+   * 开关编辑框自动换行。
+   *
+   * 立即落盘：显式偏好，下次打开应当保持。只影响**显示**，回读文件不会
+   * 多出任何换行符。
+   */
+  setWordWrap(on: boolean): void {
+    if (this.state.wordWrap === on) return;
+    this.commit({ ...this.state, wordWrap: on }, true);
   }
 
   /**

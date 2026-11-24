@@ -796,6 +796,34 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   color: var(--dsw-alias-label-tertiary);
   user-select: none;
 }
+/* 状态栏里的「换行」开关。
+   刻意做得比文档头的按钮更轻：无边框、平时与状态文字同色，悬停才浮出底色。
+   它是「顺手调一下」的偏好，不该在阅读时抢注意力；开启态借用「大纲」按钮
+   的品牌色语义，一眼能看出是开着还是关着。
+   高度 18px —— 状态栏只有 26px，常规按钮（22px）在这里会显得挤。 */
+.dsh-notes__wrapbtn {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.dsh-notes__wrapbtn:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-notes__wrapbtn--on {
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 45%, transparent);
+  color: var(--dsw-alias-brand-primary);
+}
+.dsh-notes__wrapbtn:disabled { opacity: .45; cursor: default; }
+
 /* 查找条：正好盖住文档头那一行。
    三种放法都试过：贴右上角显得挤在角落、居中会压住正文中间、浮在正文顶部会挡
    第一段。文档头本来就是一条工具栏，让它暂时变成查找栏，既不遮正文也不偏，
@@ -1007,7 +1035,11 @@ html[data-platform='darwin'] .dsh-notes__dragband {
 /* 窄容器下缩一缩内边距，把宽度尽量留给正文。
    这里同样保持「顶部 padding 为 0」——原因见 .dsh-notes__preview 的注释，
    否则窄窗下代码块工具条一样会悬空。 */
-.dsh-notes--narrow .dsh-notes__editor { padding: 14px 16px 40px; }
+.dsh-notes--narrow .dsh-notes__editor {
+  /* 右内边距记成变量：折行模式要从中扣掉滚动条宽度（见下一条规则）。 */
+  --dsh-notes-pad-right: 16px;
+  padding: 14px 16px 40px;
+}
 .dsh-notes--narrow .dsh-notes__preview { padding: 0 16px 40px; }
 /* 窄容器下左右边距只有 16px，行号列必须跟着收窄，否则整块左移超过边距、
    行号会被切到可视区外。 */
@@ -1029,6 +1061,9 @@ html[data-platform='darwin'] .dsh-notes__dragband {
      预览栏靠 flex 撑开、没有显式 width，不受影响，但为一致性也一并声明。 */
   box-sizing: border-box;
   padding: 22px 30px 60px;
+  /* 右内边距的基准值。折行模式要用它减去滚动条宽度 —— 见 .dsh-notes__editor--wrap。
+     抽成变量是为了窄容器（16px）时不用再写一遍补偿公式。 */
+  --dsh-notes-pad-right: 30px;
   border: 0;
   outline: none;
   resize: none;
@@ -1038,6 +1073,47 @@ html[data-platform='darwin'] .dsh-notes__dragband {
   font-size: 12.5px;
   line-height: 1.75;
   tab-size: 2;
+  /* 不折行时的断行规则：**显式写死**，不依赖浏览器默认值。
+     useFind 折行测量要逐项复制下面几条（见 measureWrappedHits），任何一项
+     跟着环境变（父级 word-break、UA 样式的 hyphens），镜像层就会在另一个字
+     处折行，后面整段色块一起偏位。 */
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+  line-break: normal;
+}
+
+/* 自动换行（对应 wrap="soft"）。
+   规则按 CSS Text / UAX #14 的通用做法，每条都有原因，不要随手简化：
+   · white-space: pre-wrap —— 保留空格、制表符和用户自己的换行，同时放不下
+     时折行。写 pre 会横向溢出、写 normal 会把连续空格压成一个，都不行。
+   · overflow-wrap: break-word —— 长 URL、无空白的长串、连续英文也能断开。
+     不加这条，一条超长链接照样把整行顶出可视区，等于没开换行。
+   · word-break: normal —— **绝不能**用 break-all：那会把英文单词从中间切开
+     （"exa / mple"），读起来比横向滚动更糟。
+   · line-break: normal —— 中日文禁则处理：行首不放 。，）」】 等闭合标点，
+     行尾不留 「（【 等开启标点，由浏览器按 UAX #14 断行规则处理。
+   · hyphens: manual —— 不自动加连字符：中文用不上，英文里加了也偏离原文。
+   这几条同时是 useFind 镜像层的排版前提，改这里要同步 measureWrappedHits。 */
+.dsh-notes__editor.dsh-notes__editor--wrap {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  line-break: normal;
+  hyphens: manual;
+  /*
+   * 折行时把垂直滚动条占掉的宽度从右内边距里扣回来。
+   *
+   * 折行后文字宽度 = clientWidth − 左右内边距，而 clientWidth 里已经被垂直
+   * 滚动条吃掉一条（macOS 悬浮式滚动条不占位，Windows 等平台占 15px 左右）。
+   * 不补偿的话，左边留 30px、右边只剩 15px —— 每一段折行文字整体偏右，
+   * 越到段末越明显。
+   *
+   * 宽度 CSS 拿不到，由 EditorPane 量出来写进 --dsh-notes-scrollbar
+   * （悬浮滚动条环境里是 0，等于不改）。用 max() 兜底，防止某个环境里
+   * 滚动条比内边距还宽时算出负数。
+   */
+  padding-right: max(0px, calc(var(--dsh-notes-pad-right, 30px) - var(--dsh-notes-scrollbar, 0px)));
 }
 .dsh-notes__preview {
   flex: 1;
